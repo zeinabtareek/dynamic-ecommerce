@@ -558,8 +558,8 @@ class AddToCartBottomSheet extends StatelessWidget {
                         '⚠️ Error calculating remaining quantity: $e');
                   }
 
-                  // Only show stock info if low stock (≤5) or out of stock
-                  if (!hasStockInfo || (remainingQty > 5 && remainingQty > 0)) {
+                  // Always show available count when we have stock info
+                  if (!hasStockInfo) {
                     return const SizedBox.shrink();
                   }
                   
@@ -1205,49 +1205,55 @@ class AddToCartBottomSheet extends StatelessWidget {
     }
   }
 
-  /// Helper to compute the available quantity for the *current selection*,
-  /// using the same loop-based stock logic we use for attributes/badge,
-  /// and then subtracting any quantity already in the cart for that variant.
+  /// Helper to compute the available quantity for the *current selection*.
+  ///
+  /// Primary source when `attribute_value_combinations` is present:
+  /// - `ProductDetails.selectedVariantQuantityAvailable` (already cart-adjusted
+  ///   by the BLoC on every attribute change).
+  ///
+  /// Fallback when normalized attribute data is missing:
+  /// - Resolve the exact variant from `variantCombinations` and subtract the
+  ///   current cart quantity.
   int? _getAvailableQuantityForSelection(
     ProductDetails pd,
     CartState cartState,
   ) {
     try {
-      VariantCombination? selectedVariant;
-
-      // 1) Prefer the same color-based loop used for badge/attribute disabling.
-      if (pd.selectedColor.isNotEmpty &&
-          pd.variantCombinations.isNotEmpty) {
-        selectedVariant =
-            pd.getFirstInStockVariantForColor(pd.selectedColor);
+      // 1) attribute_value_combinations: trust BLoC-computed quantity
+      if (pd.attributeVariantCombinations.isNotEmpty ||
+          pd.attributeValueCombinationsByKey.isNotEmpty) {
+        final q = pd.selectedVariantQuantityAvailable;
+        if (q != null) return q;
       }
 
-      // 2) Fallback: use full selection matching (size/color/material/height).
-      selectedVariant ??= _findSelectedVariant(pd);
+      // 2) Fallback: variant_combinations, match full selection
+      VariantCombination? selectedVariant = _findSelectedVariant(pd);
+      selectedVariant ??= (pd.selectedColor.isNotEmpty &&
+              pd.variantCombinations.isNotEmpty)
+          ? pd.getFirstInStockVariantForColor(pd.selectedColor)
+          : null;
 
-      if (selectedVariant == null ||
-          selectedVariant.quantityAvailable == null) {
-        return null;
-      }
-
-      int available = selectedVariant.quantityAvailable!.round();
-
-      // Subtract what is already in the cart for this variant.
-      if (cartState is CartLoaded) {
-        try {
-          final existingItem = cartState.cartItems.firstWhere(
-            (item) => item.product.id == selectedVariant!.variantId,
-          );
-          available = available - existingItem.quantity;
-        } catch (_) {
-          // Item not in cart → keep full available quantity.
+      if (selectedVariant != null && selectedVariant.quantityAvailable != null) {
+        int available = selectedVariant.quantityAvailable!.round();
+        if (cartState is CartLoaded) {
+          try {
+            final existingItem = cartState.cartItems.firstWhere(
+              (item) =>
+                  item.product.id.toString() ==
+                  selectedVariant!.variantId.toString(),
+            );
+            available = available - existingItem.quantity;
+          } catch (_) {}
         }
+        if (available >= 0) return available;
       }
 
-      return available;
+      // 3) No stock info available
+      return null;
     } catch (e) {
       developer.log('⚠️ Error in _getAvailableQuantityForSelection: $e');
       return null;
     }
   }
 }
+

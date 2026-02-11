@@ -2,6 +2,65 @@ import 'package:equatable/equatable.dart';
 import 'package:flutter/foundation.dart';
 import '../../../../core/constants/app_constants.dart';
 
+/// Represents a single attribute value in a variant combination coming from
+/// `attribute_value_combinations.available_combination_values`.
+class AttributeCombinationValue extends Equatable {
+  final int id; // Backend value id (e.g. 296)
+  final String value; // Slug, e.g. "size-40", "color-black"
+
+  const AttributeCombinationValue({
+    required this.id,
+    required this.value,
+  });
+
+  @override
+  List<Object?> get props => [id, value];
+}
+
+/// Represents a single variant combination derived from `attribute_value_combinations`.
+/// This is a normalized, variant-centric view that includes:
+/// - variant_id
+/// - quantity_available
+/// - in_stock
+/// - full list of attribute values (id + slug) that define this variant.
+class AttributeVariantCombination extends Equatable {
+  final int variantId;
+  final double quantityAvailable;
+  final bool inStock;
+  final List<AttributeCombinationValue> values;
+
+  const AttributeVariantCombination({
+    required this.variantId,
+    required this.quantityAvailable,
+    required this.inStock,
+    required this.values,
+  });
+
+  @override
+  List<Object?> get props => [variantId, quantityAvailable, inStock, values];
+}
+
+/// Result of resolving a selection against [attributeVariantCombinations].
+/// - [enabledValueIds]: all attribute value ids that are still valid (have stock)
+///   for the current partial selection.
+/// - [matchedVariant]: the best matching variant (if any) for the current selection.
+/// - [suggestedSelection]: when resolving by clicked value, attr slug -> value slug
+///   from the best combo's available_combination_values to auto-select in UI.
+class AttributeSelectionResult extends Equatable {
+  final Set<int> enabledValueIds;
+  final AttributeVariantCombination? matchedVariant;
+  final Map<String, String>? suggestedSelection;
+
+  const AttributeSelectionResult({
+    required this.enabledValueIds,
+    required this.matchedVariant,
+    this.suggestedSelection,
+  });
+
+  @override
+  List<Object?> get props => [enabledValueIds, matchedVariant, suggestedSelection];
+}
+
 class ProductDetails extends Equatable {
   final String id;
   final String brand;
@@ -38,6 +97,11 @@ class ProductDetails extends Equatable {
   final List<RelatedProduct> accessoryProducts;
   final List<RelatedProduct> alternativeProducts;
   final List<VariantCombination> variantCombinations;
+  /// Normalized combinations built from `attribute_value_combinations` in the API.
+  final List<AttributeVariantCombination> attributeVariantCombinations;
+  /// Map of value-key -> combos. Top-level keys from API (e.g. "printed-cover", "black", "40").
+  /// Use clicked value as key to get combos, then filter by in_stock.
+  final Map<String, List<AttributeVariantCombination>> attributeValueCombinationsByKey;
   final String primaryVariantLabel; // e.g., Legs, Size, Material (non-color attribute shown as choices)
   // Overall stock flag for the currently selected variant (computed)
   final bool inStock;
@@ -82,6 +146,8 @@ class ProductDetails extends Equatable {
     this.accessoryProducts = const [],
     this.alternativeProducts = const [],
     this.variantCombinations = const [],
+    this.attributeVariantCombinations = const [],
+    this.attributeValueCombinationsByKey = const {},
     this.primaryVariantLabel = 'Size',
     this.inStock = true,
     this.selectedVariantQuantityAvailable,
@@ -125,6 +191,8 @@ class ProductDetails extends Equatable {
       accessoryProducts,
       alternativeProducts,
       variantCombinations,
+      attributeVariantCombinations,
+      attributeValueCombinationsByKey,
       primaryVariantLabel,
       inStock,
       selectedVariantQuantityAvailable,
@@ -247,6 +315,8 @@ class ProductDetails extends Equatable {
     List<RelatedProduct>? accessoryProducts,
     List<RelatedProduct>? alternativeProducts,
     List<VariantCombination>? variantCombinations,
+    List<AttributeVariantCombination>? attributeVariantCombinations,
+    Map<String, List<AttributeVariantCombination>>? attributeValueCombinationsByKey,
     String? primaryVariantLabel,
     List<VariantAttributeOption>? variantAttributeOptions,
     bool? inStock,
@@ -288,6 +358,10 @@ class ProductDetails extends Equatable {
       accessoryProducts: accessoryProducts ?? this.accessoryProducts,
       alternativeProducts: alternativeProducts ?? this.alternativeProducts,
       variantCombinations: variantCombinations ?? this.variantCombinations,
+      attributeVariantCombinations:
+          attributeVariantCombinations ?? this.attributeVariantCombinations,
+      attributeValueCombinationsByKey:
+          attributeValueCombinationsByKey ?? this.attributeValueCombinationsByKey,
       primaryVariantLabel: primaryVariantLabel ?? this.primaryVariantLabel,
       variantAttributeOptions: variantAttributeOptions ?? this.variantAttributeOptions,
       inStock: inStock ?? this.inStock,
@@ -332,6 +406,218 @@ class ProductDetails extends Equatable {
       }
     }
     return map;
+  }
+
+  /// Builds map of attribute_slug -> value_slug from current selection.
+  /// Uses value names as-is from variantAttributeOptions (no conversion e.g. 4 to 4.0)
+  /// to match available_combination_values exactly.
+  /// API slugs: color-black, size-40, materials-printed-cover, etc.
+  Map<String, String> getSelectedAttributesForRawValueMatching() {
+    final map = <String, String>{};
+    for (final opt in variantAttributeOptions) {
+      if (opt.selectedValue.isEmpty) continue;
+      final attrLower = opt.attributeName.toLowerCase();
+      final value = opt.selectedValue.trim();
+      String attr = attrLower.replaceAll(' ', '-');
+      if (attr.contains('material')) attr = 'materials';
+      if (attr.contains('color') || attr.contains('colour')) attr = 'color';
+      final val = value.toLowerCase().replaceAll(' ', '-');
+      if (attr.isEmpty || val.isEmpty) continue;
+      map[attr] = val;
+    }
+    if (!map.containsKey('color') && selectedColor.isNotEmpty) {
+      map['color'] = selectedColor.trim().toLowerCase().replaceAll(' ', '-');
+    }
+    return map;
+  }
+
+  /// Parses combo slug "size-40" -> ("size","40"), "materials-printed-cover" -> ("materials","printed-cover")
+  static (String, String) _parseComboSlug(String slug) {
+    final idx = slug.indexOf('-');
+    if (idx <= 0) return ('', slug);
+    return (slug.substring(0, idx), slug.substring(idx + 1));
+  }
+
+  /// Returns true if combo matches our selection by raw attribute value names.
+  /// Each available_combination_values slug (e.g. "size-40") is parsed to (attr, valuePart);
+  /// for every selected (attr, value), combo must have a slug with same attr and valuePart == value.
+  bool _comboMatchesByRawValues(
+    List<AttributeCombinationValue> comboValues,
+    Map<String, String> selected,
+  ) {
+    for (final e in selected.entries) {
+      final hasMatch = comboValues.any((cv) {
+        final (attr, valuePart) = _parseComboSlug(cv.value);
+        return attr == e.key && valuePart == e.value;
+      });
+      if (!hasMatch) return false;
+    }
+    return true;
+  }
+
+  /// Normalize attribute value to API key (e.g. "PRINTED COVER" -> "printed-cover", "4" -> "4").
+  static String _toValueKey(String value) =>
+      value.trim().toLowerCase().replaceAll(' ', '-');
+
+  /// Resolve selection using ONLY the clicked attribute value name.
+  /// Flow:
+  /// 1. Lookup attribute_value_combinations[clickedValueName] by key.
+  /// 2. Filter combos where quantity_available > 0 (stock != 0).
+  /// 3. Collect enabledValueIds from available_combination_values of filtered combos.
+  /// 4. Pick best combo (highest quantity) for stock badge and suggested selection.
+  /// 5. Build suggestedSelection (attr->value) from combo's available_combination_values.
+  AttributeSelectionResult resolveSelectionByClickedValue(
+    String clickedAttributeValueName,
+  ) {
+    if (attributeValueCombinationsByKey.isEmpty) {
+      debugPrint(
+        '📦 [resolveByClickedValue] attributeValueCombinationsByKey is empty',
+      );
+      return const AttributeSelectionResult(
+        enabledValueIds: {},
+        matchedVariant: null,
+      );
+    }
+
+    final valueKey = _toValueKey(clickedAttributeValueName);
+    var candidateCombos = attributeValueCombinationsByKey[valueKey];
+    // Fallback for numeric values: try "4" and "4.0"
+    if (candidateCombos == null && valueKey.contains('.')) {
+      candidateCombos = attributeValueCombinationsByKey[valueKey.split('.').first];
+    }
+    if (candidateCombos == null && !valueKey.contains('.')) {
+      candidateCombos = attributeValueCombinationsByKey['$valueKey.0'];
+    }
+    candidateCombos ??= [];
+
+    debugPrint(
+      '📦 [resolveByClickedValue] Lookup key="$valueKey" (from "$clickedAttributeValueName") '
+      '→ combosCount=${candidateCombos.length}, availableKeys=${attributeValueCombinationsByKey.keys.toList()}',
+    );
+
+    // Filter: only combos with stock > 0
+    candidateCombos = candidateCombos
+        .where((c) => c.quantityAvailable > 0)
+        .toList();
+
+    if (candidateCombos.isEmpty) {
+      debugPrint(
+        '📦 [resolveByClickedValue] No combos with quantity_available > 0 for key="$valueKey"',
+      );
+      return const AttributeSelectionResult(
+        enabledValueIds: {},
+        matchedVariant: null,
+      );
+    }
+
+    // Best combo = highest quantity (for stock badge and suggested selection)
+    final bestCombo = candidateCombos.reduce((a, b) =>
+        a.quantityAvailable >= b.quantityAvailable ? a : b);
+
+    // Enabled ids = union of all ids from available_combination_values (filtered combos)
+    final Set<int> enabledIds = {};
+    for (final combo in candidateCombos) {
+      for (final v in combo.values) {
+        enabledIds.add(v.id);
+      }
+    }
+
+    // Suggested selection from best combo's available_combination_values
+    final Map<String, String> suggestedSelection = {};
+    for (final cv in bestCombo.values) {
+      final (attr, valuePart) = _parseComboSlug(cv.value);
+      if (attr.isNotEmpty && valuePart.isNotEmpty) {
+        suggestedSelection[attr] = valuePart;
+      }
+    }
+
+    debugPrint(
+      '📦 [resolveByClickedValue] matched: variantId=${bestCombo.variantId}, '
+      'quantityAvailable=${bestCombo.quantityAvailable}, inStock=${bestCombo.inStock}, '
+      'enabledIds=$enabledIds, suggestedSelection=$suggestedSelection',
+    );
+
+    return AttributeSelectionResult(
+      enabledValueIds: enabledIds,
+      matchedVariant: bestCombo,
+      suggestedSelection: suggestedSelection,
+    );
+  }
+
+  /// Resolve the current selection against [attributeVariantCombinations].
+  /// Uses value names only (no ID matching) to validate against
+  /// available_combination_values and obtain in_stock + quantity_available.
+  /// Prefer [resolveSelectionByClickedValue] when user clicks a single attribute.
+  AttributeSelectionResult resolveSelectionFromAttributeCombinations(
+    Set<int> selectedValueIds,
+  ) {
+    if (attributeVariantCombinations.isEmpty) {
+      return const AttributeSelectionResult(
+        enabledValueIds: {},
+        matchedVariant: null,
+      );
+    }
+
+    final candidateCombos = attributeVariantCombinations
+        .where((c) => c.inStock && c.quantityAvailable > 0)
+        .toList();
+
+    if (candidateCombos.isEmpty) {
+      return const AttributeSelectionResult(
+        enabledValueIds: {},
+        matchedVariant: null,
+      );
+    }
+
+    final selectedRawValues = getSelectedAttributesForRawValueMatching();
+    debugPrint(
+      '📦 [resolveSelection] selectedRawValues=$selectedRawValues, '
+      'candidateCombosCount=${candidateCombos.length}',
+    );
+
+    final fullMatchCombos = selectedRawValues.isNotEmpty
+        ? candidateCombos
+            .where((combo) =>
+                _comboMatchesByRawValues(combo.values, selectedRawValues))
+            .toList()
+        : <AttributeVariantCombination>[];
+
+    List<AttributeVariantCombination> compatible = fullMatchCombos.isNotEmpty
+        ? fullMatchCombos
+        : (selectedRawValues.isNotEmpty
+            ? candidateCombos.where((combo) {
+                return selectedRawValues.entries.any((e) {
+                  return combo.values.any((cv) {
+                    final (attr, valuePart) = _parseComboSlug(cv.value);
+                    return attr == e.key && valuePart == e.value;
+                  });
+                });
+              }).toList()
+            : []);
+
+    if (compatible.isEmpty) {
+      return const AttributeSelectionResult(
+        enabledValueIds: {},
+        matchedVariant: null,
+      );
+    }
+
+    final Set<int> enabledIds = {};
+    for (final combo in compatible) {
+      for (final v in combo.values) {
+        enabledIds.add(v.id);
+      }
+    }
+
+    final AttributeVariantCombination? matched = fullMatchCombos.isEmpty
+        ? null
+        : fullMatchCombos.reduce((a, b) =>
+            a.quantityAvailable >= b.quantityAvailable ? a : b);
+
+    return AttributeSelectionResult(
+      enabledValueIds: enabledIds,
+      matchedVariant: matched,
+    );
   }
 
   /// Builds map of attribute_id (from variant_attributes) -> value_name from current selection.

@@ -56,6 +56,20 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
 
   String _norm(String s) => s.toLowerCase().trim();
 
+  /// Normalize value to API key format (e.g. "PRINTED COVER" -> "printed-cover").
+  String _toValueKey(String value) =>
+      value.trim().toLowerCase().replaceAll(' ', '-');
+
+  /// Map attribute slug (from API) to normalized attribute name for matching.
+  String _attrSlugToNorm(String slug) {
+    final s = slug.toLowerCase();
+    if (s == 'materials' || s.contains('material')) return 'material';
+    if (s == 'size') return 'size';
+    if (s == 'color' || s == 'colour') return 'color';
+    if (s == 'height' || s.contains('heel')) return 'height';
+    return s;
+  }
+
   static bool _isColorAttributeKey(String key) {
     final k = key.toLowerCase();
     return k == 'color name' || k == 'color' || k == 'colour' || k == 'اللون' || k == 'لون';
@@ -120,6 +134,365 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
       if (sel.isNotEmpty && sel.first.id.trim().isNotEmpty) out['SIZE'] = sel.first.id.trim();
     }
     return out;
+  }
+
+  /// Collect currently selected attribute value ids from the product details
+  /// (color, size, and all dynamic variantAttributeOptions). These ids must
+  /// correspond to the ids used in `attribute_value_combinations` so that
+  /// [ProductDetails.resolveSelectionFromAttributeCombinations] can drive
+  /// availability and stock based on backend-provided combinations.
+  Set<int> _getSelectedAttributeValueIds(ProductDetails pd) {
+    final ids = <int>{};
+
+    // Color: use selected color option id if present.
+    try {
+      final selectedColorOpt =
+          pd.colorOptions.firstWhere((c) => c.isSelected, orElse: () => pd.colorOptions.first);
+      final colorId = int.tryParse(selectedColorOpt.id.toString());
+      if (colorId != null) ids.add(colorId);
+    } catch (_) {
+      // No color options or none selected – ignore.
+    }
+
+    // Size: use selected size option id if present.
+    try {
+      final selectedSizeOpt =
+          pd.sizeOptions.firstWhere((s) => s.isSelected, orElse: () => pd.sizeOptions.first);
+      final sizeId = int.tryParse(selectedSizeOpt.id.toString());
+      if (sizeId != null) ids.add(sizeId);
+    } catch (_) {
+      // No size options or none selected – ignore.
+    }
+
+    // Dynamic attributes: for each option, find the selected value and add its id.
+    for (final opt in pd.variantAttributeOptions) {
+      final selectedVal = opt.values.where((v) => v.isSelected).toList();
+      if (selectedVal.isEmpty) continue;
+      final rawId = selectedVal.first.id;
+      final parsedId = int.tryParse(rawId.toString());
+      if (parsedId != null) {
+        ids.add(parsedId);
+      }
+    }
+
+    return ids;
+  }
+
+  /// Build selected value ids with one attribute's value replaced.
+  /// Handles variant attributes (material, height), size, and color.
+  Set<int> _replaceAttributeValueInSelection(
+    ProductDetails pd,
+    String attributeName,
+    int newValueId,
+  ) {
+    final ids = Set<int>.from(_getSelectedAttributeValueIds(pd));
+    final attrNorm = _norm(attributeName);
+    final isSize = attrNorm == 'size' ||
+        attrNorm == pd.primaryVariantLabel.toLowerCase() ||
+        attrNorm == 'القياس';
+    final isColor = _isColorAttributeKey(attributeName);
+
+    // Remove current selection for this attribute.
+    if (isSize) {
+      for (final s in pd.sizeOptions) {
+        if (s.isSelected) {
+          final oldId = int.tryParse(s.id.toString());
+          if (oldId != null) ids.remove(oldId);
+          break;
+        }
+      }
+      for (final opt in pd.variantAttributeOptions) {
+        if (_norm(opt.attributeName) == attrNorm) {
+          for (final v in opt.values) {
+            if (v.isSelected) {
+              final oldId = int.tryParse(v.id.toString());
+              if (oldId != null) ids.remove(oldId);
+              break;
+            }
+          }
+          break;
+        }
+      }
+    } else if (isColor) {
+      for (final c in pd.colorOptions) {
+        if (c.isSelected) {
+          final oldId = int.tryParse(c.id.toString());
+          if (oldId != null) ids.remove(oldId);
+          break;
+        }
+      }
+    } else {
+      for (final opt in pd.variantAttributeOptions) {
+        if (_norm(opt.attributeName) == attrNorm) {
+          for (final v in opt.values) {
+            if (v.isSelected) {
+              final oldId = int.tryParse(v.id.toString());
+              if (oldId != null) ids.remove(oldId);
+              break;
+            }
+          }
+          break;
+        }
+      }
+    }
+    ids.add(newValueId);
+    return ids;
+  }
+
+  /// Sync selectedSize, selectedMaterial, selectedHeelHeightCm from variantAttributeOptions
+  /// so getSelectedValueSlugs() and matching see the correct selection after attribute click.
+  ProductDetails _syncSelectedFieldsFromVariantOptions(ProductDetails pd) {
+    String? newSize;
+    String? newMaterial;
+    double? newHeelHeight;
+    for (final opt in pd.variantAttributeOptions) {
+      if (opt.selectedValue.isEmpty) continue;
+      final n = _norm(opt.attributeName);
+      if (n == 'size' ||
+          n == pd.primaryVariantLabel.toLowerCase() ||
+          n == 'القياس') {
+        newSize = opt.selectedValue;
+      } else if (n.contains('material')) {
+        newMaterial = opt.selectedValue;
+      } else if (n == 'height' || n.contains('heel')) {
+        final numVal = double.tryParse(
+          opt.selectedValue.replaceAll(RegExp(r'[^0-9.]'), ''),
+        );
+        if (numVal != null) newHeelHeight = numVal;
+      }
+    }
+    return pd.copyWith(
+      selectedSize: newSize ?? pd.selectedSize,
+      selectedMaterial: newMaterial ?? pd.selectedMaterial,
+      selectedHeelHeightCm: newHeelHeight ?? pd.selectedHeelHeightCm,
+    );
+  }
+
+  /// Apply suggested selection (from combo's available_combination_values) to
+  /// variantAttributeOptions. Maps attr slug -> value slug to option selections.
+  /// [skipAttributeName] - do not overwrite selection for this attribute (keep user's click).
+  List<VariantAttributeOption> _applySuggestedSelection(
+    List<VariantAttributeOption> opts,
+    Map<String, String> suggestedSelection, {
+    String? skipAttributeName,
+  }) {
+    if (suggestedSelection.isEmpty) return opts;
+    final skipNorm = skipAttributeName != null ? _norm(skipAttributeName) : null;
+    return opts.map((opt) {
+      if (skipNorm != null && _norm(opt.attributeName) == skipNorm) return opt;
+      final optNorm = _attrSlugToNorm(_norm(opt.attributeName).replaceAll(' ', '-'));
+      String? suggestedValueSlug;
+      for (final e in suggestedSelection.entries) {
+        if (_attrSlugToNorm(e.key) == optNorm) {
+          suggestedValueSlug = e.value;
+          break;
+        }
+      }
+      if (suggestedValueSlug == null || suggestedValueSlug.isEmpty) return opt;
+      // Find value whose name normalizes to suggestedValueSlug
+      VariantAttributeValue? matched;
+      for (final v in opt.values) {
+        if (_toValueKey(v.name) == suggestedValueSlug) {
+          matched = v;
+          break;
+        }
+      }
+      if (matched == null) return opt;
+      final newValues = opt.values.map((v) {
+        return VariantAttributeValue(
+          id: v.id,
+          name: v.name,
+          isAvailable: v.isAvailable,
+          isSelected: v.id == matched!.id,
+        );
+      }).toList();
+      return VariantAttributeOption(
+        attributeName: opt.attributeName,
+        values: newValues,
+        selectedValue: matched.name,
+        apiAttributeName: opt.apiAttributeName,
+        attributeId: opt.attributeId,
+      );
+    }).toList();
+  }
+
+  /// Apply attribute_value_combinations flow: resolve selection, update availability
+  /// and stock. Returns updated ProductDetails and clamped quantity.
+  /// Set [updateImages] to true only when color changes (images come from variant).
+  /// Set [preserveStockWhenNoMatch] to true on initial load to keep model's inStock/qty from API.
+  /// Set [allAttributesEnabledOnInitial] to true on initial load so all attribute buttons are
+  /// enabled; after first click, availability is driven by attribute_value_combinations.
+  ({ProductDetails product, int quantity}) _applyAttributeCombinationsFlow(
+    ProductDetails pd,
+    Set<int> selectedValueIds,
+    int currentQuantity, {
+    bool updateImages = false,
+    bool preserveStockWhenNoMatch = false,
+    bool allAttributesEnabledOnInitial = false,
+  }) {
+    final selection = pd.resolveSelectionFromAttributeCombinations(selectedValueIds);
+    return _applyAttributeCombinationsFlowFromResult(
+      pd,
+      selection,
+      currentQuantity,
+      updateImages: updateImages,
+      preserveStockWhenNoMatch: preserveStockWhenNoMatch,
+      allAttributesEnabledOnInitial: allAttributesEnabledOnInitial,
+    );
+  }
+
+  /// Apply flow from AttributeSelectionResult (enabledIds, matchedVariant, suggestedSelection).
+  /// [skipSuggestedSelectionForAttribute] - keep user's clicked value, don't overwrite with combo.
+  ({ProductDetails product, int quantity}) _applyAttributeCombinationsFlowFromResult(
+    ProductDetails pd,
+    AttributeSelectionResult selection,
+    int currentQuantity, {
+    bool updateImages = false,
+    bool preserveStockWhenNoMatch = false,
+    bool allAttributesEnabledOnInitial = false,
+    String? skipSuggestedSelectionForAttribute,
+  }) {
+    final enabledIds = selection.enabledValueIds;
+    final matched = selection.matchedVariant;
+
+    debugPrint(
+      '📦 [attribute_value_combinations] Result: matchedVariant=${matched != null ? "variantId=${matched.variantId}, inStock=${matched.inStock}, quantityAvailable=${matched.quantityAvailable}" : "null"}, enabledValueIds=$enabledIds',
+    );
+
+    // Apply suggested selection from combo (attr values to select in UI)
+    var variantOpts = pd.variantAttributeOptions;
+    if (selection.suggestedSelection != null &&
+        selection.suggestedSelection!.isNotEmpty) {
+      variantOpts = _applySuggestedSelection(
+        variantOpts,
+        selection.suggestedSelection!,
+        skipAttributeName: skipSuggestedSelectionForAttribute,
+      );
+      debugPrint(
+        '📦 [attribute_value_combinations] Applied suggestedSelection: ${selection.suggestedSelection}',
+      );
+    }
+
+    // On initial load: all buttons enabled. After first attribute click: use enabledIds.
+    final bool useEnabledIds = !allAttributesEnabledOnInitial;
+
+    // Update availability for colors, sizes, variant attributes.
+    final updatedColorOptions = pd.colorOptions.map((c) {
+      final intId = int.tryParse(c.id.toString());
+      final isSelectedColor = _norm(c.name) == _norm(pd.selectedColor) ||
+          _norm(c.displayName ?? '') == _norm(pd.selectedColor);
+      final isAvailable = useEnabledIds
+          ? (intId != null && enabledIds.contains(intId)) || isSelectedColor
+          : true;
+      return ColorOption(
+        id: c.id,
+        name: c.name,
+        displayName: c.displayName,
+        code: c.code,
+        images: c.images,
+        isSelected: c.isSelected,
+        isAvailable: isAvailable,
+      );
+    }).toList();
+
+    final updatedSizeOptions = pd.sizeOptions.map((s) {
+      final intId = int.tryParse(s.id.toString());
+      final isSelectedSize = _norm(s.name) == _norm(pd.selectedSize);
+      final isAvailable = useEnabledIds
+          ? (intId != null && enabledIds.contains(intId)) || isSelectedSize
+          : true;
+      return SizeOption(
+        id: s.id,
+        name: s.name,
+        isAvailable: isAvailable,
+        isRecommended: s.isRecommended,
+        isSelected: s.isSelected,
+      );
+    }).toList();
+
+    final updatedVariantAttributeOptions = variantOpts.map((opt) {
+      final newValues = opt.values.map((v) {
+        final intId = int.tryParse(v.id.toString());
+        final isSelectedValue = _norm(v.name) == _norm(opt.selectedValue);
+        // Selected value must always be available - never disable the clicked attribute
+        final isAvailable = useEnabledIds
+            ? (intId != null && enabledIds.contains(intId)) || isSelectedValue
+            : true;
+        return VariantAttributeValue(
+          id: v.id,
+          name: v.name,
+          isAvailable: isAvailable,
+          isSelected: v.isSelected,
+        );
+      }).toList();
+      return VariantAttributeOption(
+        attributeName: opt.attributeName,
+        values: newValues,
+        selectedValue: opt.selectedValue,
+        apiAttributeName: opt.apiAttributeName,
+        attributeId: opt.attributeId,
+      );
+    }).toList();
+
+    int available = 0;
+    if (matched != null && matched.inStock && matched.quantityAvailable > 0) {
+      available = matched.quantityAvailable.toInt();
+      if (cartBloc.state is CartLoaded) {
+        final cartState = cartBloc.state as CartLoaded;
+        try {
+          final existingItem = cartState.cartItems.firstWhere(
+            (item) => item.product.id.toString() == matched.variantId.toString(),
+          );
+          available -= existingItem.quantity;
+        } catch (_) {}
+      }
+    }
+
+    final bool inStock = available > 0;
+    int nextQuantity = currentQuantity;
+    int? qtyForBadge;
+
+    if (matched != null) {
+      qtyForBadge = inStock ? available : null;
+      if (!inStock) {
+        nextQuantity = 1;
+      } else if (nextQuantity > available) {
+        nextQuantity = available;
+      }
+      if (nextQuantity <= 0) nextQuantity = 1;
+    } else if (preserveStockWhenNoMatch) {
+      // Keep model's values from API selected_variant (initial load).
+      qtyForBadge = pd.selectedVariantQuantityAvailable;
+      nextQuantity = currentQuantity;
+      if (pd.selectedVariantQuantityAvailable != null && currentQuantity > pd.selectedVariantQuantityAvailable!) {
+        nextQuantity = pd.selectedVariantQuantityAvailable!;
+      }
+    } else {
+      qtyForBadge = null;
+      nextQuantity = 1;
+    }
+
+    final bool finalInStock = matched != null
+        ? inStock
+        : (preserveStockWhenNoMatch ? pd.inStock : false);
+
+    debugPrint(
+      '📦 [attribute click] quantity_available: $qtyForBadge | inStock: $finalInStock',
+    );
+
+    var updated = pd.copyWith(
+      colorOptions: updatedColorOptions,
+      sizeOptions: updatedSizeOptions,
+      variantAttributeOptions: updatedVariantAttributeOptions,
+      inStock: finalInStock,
+      selectedVariantQuantityAvailable: qtyForBadge,
+    );
+
+    if (updateImages && matched != null) {
+      updated = updated.withImagesForVariant(matched.variantId.toString());
+    }
+
+    return (product: updated, quantity: nextQuantity);
   }
 
   /// Attribute value lookup from a variant combination.
@@ -664,6 +1037,52 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
     debugPrint(
       '🧩 FilterVariantsByAttributeEvent: ${event.attributeName}="${event.attributeValue}"',
     );
+
+    // Use attribute_value_combinations flow: send ONLY the clicked attribute value name.
+    // Lookup attribute_value_combinations[valueName], filter combos with stock > 0,
+    // get enabled attributes from available_combination_values, auto-select from best combo.
+    if (currentProduct.attributeValueCombinationsByKey.isNotEmpty) {
+      debugPrint(
+        '📦 [attribute_value_combinations] Sending ONLY clicked value name: "${event.attributeValue}"',
+      );
+      // Resolve by clicked value only (no set of values).
+      final selection = currentProduct.resolveSelectionByClickedValue(
+        event.attributeValue,
+      );
+      // Update clicked attribute in variantAttributeOptions.
+      var updatedPd = currentProduct;
+      final updatedOpts = currentProduct.variantAttributeOptions.map((opt) {
+        if (_norm(opt.attributeName) != _norm(event.attributeName)) return opt;
+        final newValues = opt.values.map((v) {
+          final isSelected = _norm(v.name) == _norm(event.attributeValue);
+          return VariantAttributeValue(
+            id: v.id,
+            name: v.name,
+            isAvailable: v.isAvailable,
+            isSelected: isSelected,
+          );
+        }).toList();
+        return VariantAttributeOption(
+          attributeName: opt.attributeName,
+          values: newValues,
+          selectedValue: event.attributeValue,
+          apiAttributeName: opt.apiAttributeName,
+          attributeId: opt.attributeId,
+        );
+      }).toList();
+      updatedPd = currentProduct.copyWith(variantAttributeOptions: updatedOpts);
+      // Apply flow: suggestedSelection auto-selects other attributes, but keep clicked attribute.
+      final result = _applyAttributeCombinationsFlowFromResult(
+        updatedPd,
+        selection,
+        blocState.quantity,
+        skipSuggestedSelectionForAttribute: event.attributeName,
+      );
+      final finalProduct = _syncSelectedFieldsFromVariantOptions(result.product);
+      emit(ProductDetailsLoaded(finalProduct, quantity: result.quantity, isAdding: false));
+      return;
+    }
+
     debugPrint(
       '   Current selections: size="${currentProduct.selectedSize}", color="${currentProduct.selectedColor}", '
       'material="${currentProduct.selectedMaterial ?? ''}", height="${currentProduct.selectedHeelHeightCm?.toStringAsFixed(1) ?? ''}"',
@@ -1805,44 +2224,59 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
           'material:"${updatedProduct.selectedMaterial}", heelHeight:${updatedProduct.selectedHeelHeightCm?.toStringAsFixed(1) ?? "null"}',
         );
         int initialQuantity = 1;
-        
-        final VariantCombination? selectedVariant = _findSelectedVariant(updatedProduct);
-        if (selectedVariant != null) {
-          final double? quantityAvailable = selectedVariant.quantityAvailable;
-          bool variantInStock = selectedVariant.inStock;
-          
-          debugPrint('📦 Initial variant: variantId=${selectedVariant.variantId}, inStock=$variantInStock, quantityAvailable=$quantityAvailable');
-          
-          // Check stock: if quantity is known, require > 0. If unknown (null), rely on inStock flag.
-          final qty = quantityAvailable;
-          if (qty != null) {
-            variantInStock = variantInStock && qty > 0;
-          }
-          
-          if (qty != null && qty > 0) {
-            final int maxAllowed = qty.toInt();
-            // Ensure initial quantity doesn't exceed available stock
-            initialQuantity = initialQuantity > maxAllowed ? maxAllowed : initialQuantity;
-            if (initialQuantity <= 0) {
+
+        // Prefer new attribute_value_combinations-based flow when available.
+        if (updatedProduct.attributeVariantCombinations.isNotEmpty) {
+          final result = _applyAttributeCombinationsFlow(
+            updatedProduct,
+            _getSelectedAttributeValueIds(updatedProduct),
+            initialQuantity,
+            updateImages: true,
+            preserveStockWhenNoMatch: false, // Show correct stock for selected combo
+            allAttributesEnabledOnInitial: true,
+          );
+          updatedProduct = result.product;
+          initialQuantity = result.quantity;
+        } else {
+          // Fallback to legacy variant_combinations-based flow when normalized data is absent.
+          final VariantCombination? selectedVariant = _findSelectedVariant(updatedProduct);
+          if (selectedVariant != null) {
+            final double? quantityAvailable = selectedVariant.quantityAvailable;
+            bool variantInStock = selectedVariant.inStock;
+            
+            debugPrint('📦 Initial variant: variantId=${selectedVariant.variantId}, inStock=$variantInStock, quantityAvailable=$quantityAvailable');
+            
+            // Check stock: if quantity is known, require > 0. If unknown (null), rely on inStock flag.
+            final qty = quantityAvailable;
+            if (qty != null) {
+              variantInStock = variantInStock && qty > 0;
+            }
+            
+            if (qty != null && qty > 0) {
+              final int maxAllowed = qty.toInt();
+              // Ensure initial quantity doesn't exceed available stock
+              initialQuantity = initialQuantity > maxAllowed ? maxAllowed : initialQuantity;
+              if (initialQuantity <= 0) {
+                initialQuantity = 1;
+              }
+            } else {
               initialQuantity = 1;
             }
-          } else {
-            initialQuantity = 1;
-          }
-          
-          updatedProduct = updatedProduct.copyWith(
-            inStock: variantInStock,
-            selectedVariantQuantityAvailable: selectedVariant.quantityAvailable?.toInt(),
-          );
-          // Set initial images by color only (variant_id from first variant matching selected color)
-          if (updatedProduct.variantImagesMap.isNotEmpty) {
-            final vid = updatedProduct.variantIdForImagesByColor;
-            if (vid != null && vid.isNotEmpty) {
-              updatedProduct = updatedProduct.withImagesForVariant(vid);
+            
+            updatedProduct = updatedProduct.copyWith(
+              inStock: variantInStock,
+              selectedVariantQuantityAvailable: selectedVariant.quantityAvailable?.toInt(),
+            );
+            // Set initial images by color only (variant_id from first variant matching selected color)
+            if (updatedProduct.variantImagesMap.isNotEmpty) {
+              final vid = updatedProduct.variantIdForImagesByColor;
+              if (vid != null && vid.isNotEmpty) {
+                updatedProduct = updatedProduct.withImagesForVariant(vid);
+              }
             }
           }
         }
-        
+
         emit(ProductDetailsLoaded(updatedProduct, quantity: initialQuantity, isAdding: false));
       },
     );
@@ -1990,6 +2424,80 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
               debugPrint('✅ Using variantAttributeOptions (secondary): "$actualColorName" for color ID ${event.colorId}');
             }
           } catch (_) {}
+        }
+      }
+
+      // When attribute_value_combinations is present: send ONLY clicked color name.
+      if (currentProduct.attributeValueCombinationsByKey.isNotEmpty) {
+        final colorName = actualColorName ?? selectedColorOption.name;
+        if (colorName != null && colorName.isNotEmpty) {
+          debugPrint(
+            '📦 [attribute_value_combinations] SelectColor: sending ONLY clicked value name: "$colorName"',
+          );
+          final selection = currentProduct.resolveSelectionByClickedValue(colorName);
+          final updatedColorOptions = currentProduct.colorOptions.map((c) {
+            return ColorOption(
+              id: c.id,
+              name: c.name,
+              displayName: c.displayName,
+              code: c.code,
+              images: c.images,
+              isSelected: c.id.toString().trim() == event.colorId.toString().trim(),
+            );
+          }).toList();
+          final updatedColorOpts = currentProduct.variantAttributeOptions.map((opt) {
+            final attrLower = opt.attributeName.toLowerCase();
+            if (attrLower != 'color name' && attrLower != 'color' && attrLower != 'colour' && attrLower != 'اللون') {
+              return opt;
+            }
+            final newValues = opt.values.map((v) {
+              return VariantAttributeValue(
+                id: v.id,
+                name: v.name,
+                isAvailable: v.isAvailable,
+                isSelected: v.id.toString().trim() == event.colorId.toString().trim(),
+              );
+            }).toList();
+            final matching = opt.values
+                .where((v) => v.id.toString().trim() == event.colorId.toString().trim())
+                .map((v) => v.name)
+                .toList();
+            final selectedVal = matching.isNotEmpty ? matching.first : colorName;
+            return VariantAttributeOption(
+              attributeName: opt.attributeName,
+              values: newValues,
+              selectedValue: selectedVal,
+              apiAttributeName: opt.apiAttributeName,
+              attributeId: opt.attributeId,
+            );
+          }).toList();
+          var updatedPd = currentProduct.copyWith(
+            colorOptions: updatedColorOptions,
+            selectedColor: colorName,
+            variantAttributeOptions: updatedColorOpts,
+          );
+          final colorAttrName = currentProduct.variantAttributeOptions
+              .where((o) {
+                final a = _norm(o.attributeName);
+                return a == 'color' || a == 'colour' || a == 'color name' || a == 'اللون';
+              })
+              .map((o) => o.attributeName)
+              .firstOrNull;
+          final result = _applyAttributeCombinationsFlowFromResult(
+            updatedPd,
+            selection,
+            currentState.quantity,
+            updateImages: true,
+            skipSuggestedSelectionForAttribute: colorAttrName,
+          );
+          final finalProduct = _syncSelectedFieldsFromVariantOptions(result.product);
+          emit(ProductDetailsLoaded(finalProduct, quantity: result.quantity, isAdding: false));
+          final res = await selectColor(SelectColorParams(productId: event.productId, colorId: event.colorId));
+          res.fold(
+            (failure) => emit(ProductDetailsError(failure.message)),
+            (_) {},
+          );
+          return;
         }
       }
 
@@ -2987,14 +3495,156 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         accessoryProducts: currentProduct.accessoryProducts,
         alternativeProducts: currentProduct.alternativeProducts,
         variantCombinations: currentProduct.variantCombinations,
+        attributeVariantCombinations: currentProduct.attributeVariantCombinations,
+        attributeValueCombinationsByKey: currentProduct.attributeValueCombinationsByKey,
         primaryVariantLabel: currentProduct.primaryVariantLabel,
         tags: currentProduct.tags,
         variantImagesMap: currentProduct.variantImagesMap,
       );
-      
-      // Sync stock & quantity with the newly selected variant
-      // When color changes, use ONLY getFirstInStockVariantForColor (color-only matching)
+
+      // NEW: When using attribute_value_combinations, resolve the selection purely
+      // from backend-provided combinations (id + value), and use that to drive
+      // stock, quantity and attribute availability.
       int nextQuantity = currentState.quantity;
+      if (updatedProduct.attributeVariantCombinations.isNotEmpty) {
+        final selectedIds = _getSelectedAttributeValueIds(updatedProduct);
+        final selection =
+            updatedProduct.resolveSelectionFromAttributeCombinations(selectedIds);
+        final enabledIds = selection.enabledValueIds;
+        final matched = selection.matchedVariant;
+
+        // Update availability of dynamic attributes based on enabled ids.
+        final updatedVariantAttributeOptions2 =
+            updatedProduct.variantAttributeOptions.map((opt) {
+          final newValues = opt.values.map((v) {
+            final intId = int.tryParse(v.id.toString());
+            final isAvailable =
+                intId != null && enabledIds.contains(intId);
+            return VariantAttributeValue(
+              id: v.id,
+              name: v.name,
+              isAvailable: isAvailable,
+              isSelected: v.isSelected,
+            );
+          }).toList();
+          return VariantAttributeOption(
+            attributeName: opt.attributeName,
+            values: newValues,
+            selectedValue: opt.selectedValue,
+            apiAttributeName: opt.apiAttributeName,
+            attributeId: opt.attributeId,
+          );
+        }).toList();
+
+        // Update availability of colors and sizes based on enabled ids.
+        final updatedColorOptions2 = updatedProduct.colorOptions.map((c) {
+          final intId = int.tryParse(c.id.toString());
+          final isAvailable =
+              intId != null && enabledIds.contains(intId);
+          return ColorOption(
+            id: c.id,
+            name: c.name,
+            displayName: c.displayName,
+            code: c.code,
+            images: c.images,
+            isSelected: c.isSelected,
+            isAvailable: isAvailable,
+          );
+        }).toList();
+
+        final updatedSizeOptions2 = updatedProduct.sizeOptions.map((s) {
+          final intId = int.tryParse(s.id.toString());
+          final isAvailable =
+              intId != null && enabledIds.contains(intId);
+          return SizeOption(
+            id: s.id,
+            name: s.name,
+            isAvailable: isAvailable,
+            isRecommended: s.isRecommended,
+            isSelected: s.isSelected,
+          );
+        }).toList();
+
+        bool finalInStock = false;
+        int? qtyForBadge;
+
+        if (matched != null) {
+          int available = matched.quantityAvailable.toInt();
+
+          // Subtract what is already in the cart for this variant.
+          if (cartBloc.state is CartLoaded) {
+            final cartState = cartBloc.state as CartLoaded;
+            try {
+              final existingItem = cartState.cartItems.firstWhere(
+                (item) => item.product.id.toString() == matched.variantId.toString(),
+              );
+              available -= existingItem.quantity;
+            } catch (_) {
+              // Not in cart → keep full available.
+            }
+          }
+
+          if (!matched.inStock || available <= 0) {
+            finalInStock = false;
+            nextQuantity = 1;
+            qtyForBadge = 0;
+          } else {
+            finalInStock = true;
+            if (nextQuantity > available) nextQuantity = available;
+            if (nextQuantity <= 0) nextQuantity = 1;
+            qtyForBadge = available;
+          }
+        } else {
+          // No matching variant for this selection → out of stock.
+          finalInStock = false;
+          nextQuantity = 1;
+          qtyForBadge = null;
+        }
+
+        updatedProduct = updatedProduct.copyWith(
+          colorOptions: updatedColorOptions2,
+          sizeOptions: updatedSizeOptions2,
+          variantAttributeOptions: updatedVariantAttributeOptions2,
+          inStock: finalInStock,
+          selectedVariantQuantityAvailable: qtyForBadge,
+        );
+
+        // Update images only when color changes: use variant_id from first
+        // variant matching selected color (variantImagesMap = multiple images per variant).
+        final vid = updatedProduct.variantIdForImagesByColor;
+        if (vid != null && vid.isNotEmpty) {
+          updatedProduct = updatedProduct.withImagesForVariant(vid);
+          debugPrint(
+              '🎨 _onSelectColor: images from variantIdByColor=$vid (${updatedProduct.images.length} images)');
+        } else if (selectedColorOption.images.isNotEmpty) {
+          updatedProduct = updatedProduct.copyWith(
+              images: List<String>.from(selectedColorOption.images));
+          debugPrint(
+              '🎨 Using ColorOption.images: ${selectedColorOption.images.length} (${selectedColorOption.displayNameOrName})');
+        }
+
+        emit(ProductDetailsLoaded(
+          updatedProduct,
+          quantity: nextQuantity,
+          isAdding: false,
+        ));
+
+        // Still call backend selectColor usecase to keep server in sync,
+        // but do not re-emit its result.
+        final result = await selectColor(SelectColorParams(
+          productId: event.productId,
+          colorId: event.colorId,
+        ));
+        result.fold(
+          (failure) => emit(ProductDetailsError(failure.message)),
+          (_) {},
+        );
+        return;
+      }
+      
+      // Legacy fallback path when attributeVariantCombinations is not available.
+      // Sync stock & quantity with the newly selected variant using old logic.
+      int nextQuantityLegacy = currentState.quantity;
       final VariantCombination? selectedVariant = updatedProduct.selectedColor.isNotEmpty
           ? updatedProduct.getFirstInStockVariantForColor(updatedProduct.selectedColor)
           : null;
@@ -3137,7 +3787,90 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
       final currentState = state as ProductDetailsLoaded;
       final currentProduct = currentState.productDetails;
       debugPrint('🚀 Product loaded: ${currentProduct.name}');
-      
+
+      // Use attribute_value_combinations flow: send ONLY clicked size name.
+      if (currentProduct.attributeValueCombinationsByKey.isNotEmpty) {
+        String selectedSizeName = '';
+        for (final s in currentProduct.sizeOptions) {
+          if (s.id.toString().trim() == event.sizeId.toString().trim()) {
+            selectedSizeName = s.name;
+            break;
+          }
+        }
+        if (selectedSizeName.isEmpty) {
+          for (final opt in currentProduct.variantAttributeOptions) {
+            if (_norm(opt.attributeName) == 'size' ||
+                _norm(opt.attributeName) == currentProduct.primaryVariantLabel.toLowerCase()) {
+              try {
+                final v = opt.values.firstWhere(
+                  (x) => x.id.toString().trim() == event.sizeId.toString().trim(),
+                );
+                selectedSizeName = v.name;
+                break;
+              } catch (_) {}
+            }
+          }
+        }
+        if (selectedSizeName.isNotEmpty) {
+          debugPrint(
+            '📦 [attribute_value_combinations] SelectSize: sending ONLY clicked value name: "$selectedSizeName"',
+          );
+          final selection = currentProduct.resolveSelectionByClickedValue(
+            selectedSizeName,
+          );
+          var updatedPd = currentProduct.copyWith(
+            selectedSize: selectedSizeName,
+            sizeOptions: currentProduct.sizeOptions.map((s) {
+              return SizeOption(
+                id: s.id,
+                name: s.name,
+                isAvailable: s.isAvailable,
+                isRecommended: s.isRecommended,
+                isSelected: s.id.toString().trim() == event.sizeId.toString().trim(),
+              );
+            }).toList(),
+            variantAttributeOptions: currentProduct.variantAttributeOptions.map((opt) {
+              if (_norm(opt.attributeName) != 'size' &&
+                  _norm(opt.attributeName) != currentProduct.primaryVariantLabel.toLowerCase()) {
+                return opt;
+              }
+              return VariantAttributeOption(
+                attributeName: opt.attributeName,
+                values: opt.values.map((v) {
+                  return VariantAttributeValue(
+                    id: v.id,
+                    name: v.name,
+                    isAvailable: v.isAvailable,
+                    isSelected: v.id.toString().trim() == event.sizeId.toString().trim(),
+                  );
+                }).toList(),
+                selectedValue: selectedSizeName,
+                apiAttributeName: opt.apiAttributeName,
+                attributeId: opt.attributeId,
+              );
+            }).toList(),
+          );
+          final sizeAttrName = currentProduct.variantAttributeOptions
+                  .where((o) =>
+                      _norm(o.attributeName) == 'size' ||
+                      _norm(o.attributeName) == currentProduct.primaryVariantLabel.toLowerCase())
+                  .map((o) => o.attributeName)
+                  .firstOrNull ??
+              (currentProduct.primaryVariantLabel.isNotEmpty
+                  ? currentProduct.primaryVariantLabel
+                  : 'Size');
+          final result = _applyAttributeCombinationsFlowFromResult(
+            updatedPd,
+            selection,
+            currentState.quantity,
+            skipSuggestedSelectionForAttribute: sizeAttrName,
+          );
+          final finalProduct = _syncSelectedFieldsFromVariantOptions(result.product);
+          emit(ProductDetailsLoaded(finalProduct, quantity: result.quantity, isAdding: false));
+          return;
+        }
+      }
+
       // Find the selected size.
       // NOTE: Backend sometimes sends sizeOptions as empty, but we still have sizes
       // inside variantAttributeOptions. In that case we synthesize sizeOptions
@@ -4077,6 +4810,41 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
     }
   }
 
+  /// Get available quantity for current selection (same logic as bottom sheet).
+  int? _getAvailableQuantityForIncrement(ProductDetails pd) {
+    // 1) attribute_value_combinations: when present, trust BLoC's
+    //    selectedVariantQuantityAvailable (already cart-adjusted).
+    if (pd.attributeVariantCombinations.isNotEmpty ||
+        pd.attributeValueCombinationsByKey.isNotEmpty) {
+      return pd.selectedVariantQuantityAvailable;
+    }
+
+    // 2) Fallback: variant_combinations full selection match.
+    VariantCombination? selectedVariant = _findSelectedVariant(pd);
+    selectedVariant ??= (pd.selectedColor.isNotEmpty &&
+            pd.variantCombinations.isNotEmpty)
+        ? pd.getFirstInStockVariantForColor(pd.selectedColor)
+        : null;
+
+    if (selectedVariant != null && selectedVariant.quantityAvailable != null) {
+      int available = selectedVariant.quantityAvailable!.round();
+      if (cartBloc.state is CartLoaded) {
+        final cartState = cartBloc.state as CartLoaded;
+        try {
+          final existingItem = cartState.cartItems.firstWhere(
+            (item) =>
+                item.product.id.toString() ==
+                selectedVariant!.variantId.toString(),
+          );
+          available = available - existingItem.quantity;
+        } catch (_) {}
+      }
+      if (available >= 0) return available;
+    }
+
+    return null;
+  }
+
   void _onIncrementQty(
     IncrementQuantityEvent event,
     Emitter<ProductDetailsState> emit,
@@ -4084,69 +4852,34 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
     if (state is ProductDetailsLoaded) {
       final s = state as ProductDetailsLoaded;
       final pd = s.productDetails;
-      
-      // Use the same variant resolution as the add-to-cart bottom sheet
-      // (getFirstInStockVariantForColor first, then _findSelectedVariant)
-      // so increment respects the same available stock shown in the UI.
-      VariantCombination? selectedVariant;
-      if (pd.selectedColor.isNotEmpty && pd.variantCombinations.isNotEmpty) {
-        selectedVariant = pd.getFirstInStockVariantForColor(pd.selectedColor);
-      }
-      selectedVariant ??= _findSelectedVariant(pd);
 
-      if (selectedVariant == null) {
-        debugPrint('⚠️ Cannot find selected variant, allowing increment');
-        final newQuantity = s.quantity + 1;
-        emit(s.copyWith(quantity: newQuantity));
-        return;
-      }
-      
-      // Get available quantity for this variant
-      final quantityAvailable = selectedVariant.quantityAvailable ?? double.infinity;
-      if (quantityAvailable == 0) {
-        debugPrint('⚠️ Product is out of stock, cannot increment');
-        return;
-      }
-      
-      // Check if there's already an item in cart with this variant ID
-      int existingCartQuantity = 0;
-      final variantId = selectedVariant.variantId;
-      if (cartBloc.state is CartLoaded) {
-        final cartState = cartBloc.state as CartLoaded;
-        try {
-          final existingItem = cartState.cartItems.firstWhere(
-            (item) => item.product.id == variantId,
-          );
-          existingCartQuantity = existingItem.quantity;
-        } catch (e) {
-          // Item not found in cart, existingCartQuantity remains 0
-          debugPrint('ℹ️ Item not found in cart, using 0 for existing quantity');
-        }
-      }
-      
-      // Available = total stock minus what's already in cart (same as bottom sheet)
-      final maxAllowed = quantityAvailable.toInt();
-      final available = maxAllowed - existingCartQuantity;
-      
-      // If current quantity exceeds available (e.g. after variant change), clamp and emit
-      if (s.quantity > available && available > 0) {
-        debugPrint('⚠️ Clamping quantity from ${s.quantity} to $available (available stock)');
-        emit(s.copyWith(quantity: available));
+      // Use same available logic as "X available" display (variant_combinations + attribute flow)
+      final available = _getAvailableQuantityForIncrement(pd);
+      if (available == null) {
+        debugPrint('⚠️ Cannot determine available quantity, allowing increment');
+        emit(s.copyWith(quantity: s.quantity + 1));
         return;
       }
       if (available <= 0) {
-        debugPrint('⚠️ No available stock, cannot increment');
+        debugPrint('⚠️ Product is out of stock (available=$available), cannot increment');
         return;
       }
-      
-      // Prevent incrementing if already at max available
+
+      // Clamp if current exceeds available (e.g. after variant change)
+      if (s.quantity > available) {
+        debugPrint('⚠️ Clamping quantity from ${s.quantity} to $available');
+        emit(s.copyWith(quantity: available));
+        return;
+      }
+
+      // Prevent incrementing if already at max
       if (s.quantity >= available) {
-        debugPrint('⚠️ Cannot increment: quantity (${s.quantity}) at max available ($available)');
+        debugPrint('⚠️ At max available ($available), cannot increment');
         return;
       }
-      
+
       final newQuantity = s.quantity + 1;
-      debugPrint('➕ Incrementing quantity from ${s.quantity} to $newQuantity (available: $available)');
+      debugPrint('➕ Incrementing: ${s.quantity} → $newQuantity (available: $available)');
       emit(s.copyWith(quantity: newQuantity));
     }
   }
@@ -4167,3 +4900,4 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
     }
   }
 }
+

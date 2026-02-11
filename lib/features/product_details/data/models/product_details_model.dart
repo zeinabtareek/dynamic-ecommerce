@@ -38,6 +38,8 @@ class ProductDetailsModel extends ProductDetails {
     super.accessoryProducts = const [],
     super.alternativeProducts = const [],
     super.variantCombinations = const [],
+    super.attributeVariantCombinations = const [],
+    super.attributeValueCombinationsByKey = const {},
     super.primaryVariantLabel = 'Size',
     super.inStock = true,
     super.selectedVariantQuantityAvailable,
@@ -437,19 +439,16 @@ class ProductDetailsModel extends ProductDetails {
             ));
           }
           
-          // Select the first available value by default
+          // Select the first value by default (initial stage shows first of each attribute)
           String selectedValue = '';
           if (values.isNotEmpty) {
-            final firstAvailable = values.firstWhere(
-              (v) => v.isAvailable,
-              orElse: () => values.first,
-            );
-            selectedValue = firstAvailable.name;
+            final firstValue = values.first;
+            selectedValue = firstValue.name;
             // Mark as selected
-            values[values.indexWhere((v) => v.name == selectedValue)] = VariantAttributeValueModel(
-              id: firstAvailable.id,
-              name: firstAvailable.name,
-              isAvailable: firstAvailable.isAvailable,
+            values[0] = VariantAttributeValueModel(
+              id: firstValue.id,
+              name: firstValue.name,
+              isAvailable: firstValue.isAvailable,
               isSelected: true,
             );
           }
@@ -487,68 +486,19 @@ class ProductDetailsModel extends ProductDetails {
         }
       }
 
-    // Preselect attribute values from an initial variant:
-    // 1) Prefer explicit selected_variant from the API when present.
-    // 2) Otherwise, fall back to the first entry in variant_combinations.
-    // This ensures that, on first load, the UI reflects a real variant
-    // combination instead of arbitrary \"first available\" values per attribute.
+    // Always use first value of each attribute on initial load (already set above).
+    // Capture heel height from the first HEIGHT value when present.
     double? selectedHeelHeightFromVariant;
-    Map<String, dynamic>? initialVariant =
-        json['selected_variant'] as Map<String, dynamic>?;
-
-    if (initialVariant == null) {
-      final List<dynamic> combos =
-          (json['variant_combinations'] as List<dynamic>?) ?? const [];
-      if (combos.isNotEmpty && combos.first is Map<String, dynamic>) {
-        initialVariant = combos.first as Map<String, dynamic>;
-      }
-    }
-
-    if (initialVariant != null) {
-      final List<dynamic> selAttrs =
-          (initialVariant['attributes'] as List<dynamic>?) ?? const [];
-      if (selAttrs.isNotEmpty && variantAttributeOptions.isNotEmpty) {
-        for (final sa in selAttrs) {
-          if (sa is! Map) continue;
-          final String attrName = (sa['attribute_name'] ?? '').toString();
-          final String valueName = (sa['value_name'] ?? '').toString();
-
-          // Capture numeric heel height when available
-          if (attrName.toLowerCase() == 'height' ||
-              attrName.toLowerCase() == 'heel height') {
-            final numeric = double.tryParse(
-              valueName.replaceAll(RegExp(r'[^0-9.]'), ''),
-            );
-            if (numeric != null) {
-              selectedHeelHeightFromVariant = numeric;
-            }
-          }
-
-          final int optIdx = variantAttributeOptions.indexWhere(
-            (o) =>
-                o.attributeName.toLowerCase() == attrName.toLowerCase() ||
-                (o.apiAttributeName?.toLowerCase() ==
-                    attrName.toLowerCase()),
-          );
-          if (optIdx >= 0) {
-            final opt = variantAttributeOptions[optIdx];
-            final updatedValues = opt.values.map((v) {
-              return VariantAttributeValueModel(
-                id: v.id,
-                name: v.name,
-                isAvailable: v.isAvailable,
-                isSelected: v.name.toLowerCase() == valueName.toLowerCase(),
-              );
-            }).toList();
-            variantAttributeOptions[optIdx] = VariantAttributeOptionModel(
-              attributeName: opt.attributeName,
-              values: updatedValues,
-              selectedValue: valueName,
-              apiAttributeName: opt.apiAttributeName,
-              attributeId: opt.attributeId,
-            );
-          }
-        }
+    for (final opt in variantAttributeOptions) {
+      if (opt.values.isEmpty) continue;
+      final attrLower = opt.attributeName.toLowerCase();
+      if (attrLower == 'height' || attrLower == 'heel height') {
+        final firstVal = opt.values.first;
+        final numeric = double.tryParse(
+          firstVal.name.replaceAll(RegExp(r'[^0-9.]'), ''),
+        );
+        if (numeric != null) selectedHeelHeightFromVariant = numeric;
+        break;
       }
     }
 
@@ -634,21 +584,10 @@ class ProductDetailsModel extends ProductDetails {
     print('🔍 ProductDetailsModel: parsedImages = $parsedImages');
     
     List<ColorOptionModel> colorOptions;
-    // Prefer explicit color attribute from variant_attributes when present
+    // Use first color on initial load (no selected_variant override)
     final variantAttrs = (json['variant_attributes'] as List<dynamic>?) ?? const [];
     final selectedVariant = json['selected_variant'] as Map<String, dynamic>?;
-    String? selectedColorName;
-    if (selectedVariant != null) {
-      print('🎯 ProductDetailsModel: Processing selected_variant: $selectedVariant');
-      final attrs = (selectedVariant['attributes'] as List<dynamic>?) ?? const [];
-      for (final a in attrs) {
-        final attrName = (a['attribute_name'] ?? '').toString().toLowerCase();
-        if (attrName == 'color' || attrName == 'colour' || attrName == 'اللون' || attrName == 'color name') {
-          selectedColorName = (a['value_name'] ?? '').toString();
-          print('🎨 ProductDetailsModel: Found selected color: $selectedColorName');
-        }
-      }
-    }
+    String? selectedColorName; // Left null so first color is used
     Map<String, dynamic>? colorAttr;
     for (final a in variantAttrs) {
       if (a is Map) {
@@ -977,6 +916,94 @@ class ProductDetailsModel extends ProductDetails {
         }
       }
 
+      // Build normalized attributeVariantCombinations and attributeValueCombinationsByKey.
+      final List<AttributeVariantCombination> attributeVariantCombinations = [];
+      final Map<String, List<AttributeVariantCombination>> attributeValueCombinationsByKey = {};
+      final rawAttrValueCombos = json['attribute_value_combinations'];
+      AttributeVariantCombination? parseCombo(Map<String, dynamic> combo) {
+        final variantIdRaw = combo['variant_id'];
+        if (variantIdRaw == null) return null;
+        final int variantId = variantIdRaw is int
+            ? variantIdRaw
+            : int.tryParse(variantIdRaw.toString()) ?? -1;
+        if (variantId <= 0) return null;
+        final quantityRaw = combo['quantity_available'];
+        final double quantityAvailable = quantityRaw is num
+            ? quantityRaw.toDouble()
+            : (quantityRaw is String
+                ? double.tryParse(quantityRaw) ?? 0.0
+                : 0.0);
+        final bool inStock = combo['in_stock'] == true;
+        final List<dynamic> av =
+            combo['available_combination_values'] as List<dynamic>? ?? const [];
+        final values = <AttributeCombinationValue>[];
+        for (final vRaw in av) {
+          if (vRaw is! Map<String, dynamic>) continue;
+          final idRaw = vRaw['id'];
+          if (idRaw == null) continue;
+          final int id = idRaw is int
+              ? idRaw
+              : int.tryParse(idRaw.toString()) ?? -1;
+          if (id <= 0) continue;
+          values.add(AttributeCombinationValue(
+            id: id,
+            value: (vRaw['value'] ?? '').toString(),
+          ));
+        }
+        return AttributeVariantCombination(
+          variantId: variantId,
+          quantityAvailable: quantityAvailable,
+          inStock: inStock,
+          values: values,
+        );
+      }
+      List<dynamic> extractCombosList(dynamic raw) {
+        if (raw is List) return raw;
+        if (raw is Map<String, dynamic>) {
+          final direct = raw['combinations'] as List<dynamic>?;
+          if (direct != null) return direct;
+          final List<dynamic> acc = [];
+          raw.forEach((key, value) {
+            if (value is Map<String, dynamic>) {
+              final list = value['combinations'] as List<dynamic>? ?? const [];
+              acc.addAll(list);
+            }
+          });
+          return acc;
+        }
+        return const [];
+      }
+      // Build byKey from top-level structure: key (value name) -> list of combos
+      if (rawAttrValueCombos is Map<String, dynamic>) {
+        rawAttrValueCombos.forEach((key, value) {
+          if (value is! Map<String, dynamic>) return;
+          final list = value['combinations'] as List<dynamic>? ?? const [];
+          final combos = <AttributeVariantCombination>[];
+          final variantMap = <int, AttributeVariantCombination>{};
+          for (final comboRaw in list) {
+            if (comboRaw is! Map<String, dynamic>) continue;
+            final c = parseCombo(comboRaw);
+            if (c != null) {
+              variantMap.putIfAbsent(c.variantId, () => c);
+            }
+          }
+          combos.addAll(variantMap.values);
+          if (combos.isNotEmpty) {
+            attributeValueCombinationsByKey[key] = combos;
+          }
+        });
+      }
+      final combosList = extractCombosList(rawAttrValueCombos);
+      if (combosList.isNotEmpty) {
+        final Map<int, AttributeVariantCombination> variantMap = {};
+        for (final comboRaw in combosList) {
+          if (comboRaw is! Map<String, dynamic>) continue;
+          final c = parseCombo(comboRaw);
+          if (c != null) variantMap.putIfAbsent(c.variantId, () => c);
+        }
+        attributeVariantCombinations.addAll(variantMap.values);
+      }
+
       return ProductDetailsModel(
       id: json['id']?.toString() ?? '',
       brand: _parseBrand(json['brand']),
@@ -1050,9 +1077,11 @@ class ProductDetailsModel extends ProductDetails {
           quantityAvailable: quantityAvailableToStore,
         );
       }).toList(),
+      attributeVariantCombinations: attributeVariantCombinations,
+      attributeValueCombinationsByKey: attributeValueCombinationsByKey,
       primaryVariantLabel: primaryVariantLabel.isNotEmpty ? primaryVariantLabel : 'Size',
-      inStock: (json['in_stock'] ?? true) == true,
-      selectedVariantQuantityAvailable: null, // Set by BLoC when variant is resolved
+      inStock: _initialInStock(_initialStockSource(selectedVariant, variantCombinations, json)),
+      selectedVariantQuantityAvailable: _initialQuantityAvailable(_initialStockSource(selectedVariant, variantCombinations, json)),
       // Parse product tags
       tags: (json['product_tag_ids'] as List<dynamic>? ?? const []).map((tag) {
         final tagMap = tag as Map<String, dynamic>;
@@ -1068,6 +1097,42 @@ class ProductDetailsModel extends ProductDetails {
       print('❌ JSON data: $json');
       rethrow;
     }
+  }
+
+  /// Prefer selected_variant, else data block (json), else first variant_combinations.
+  static Map<String, dynamic>? _initialStockSource(
+    Map<String, dynamic>? selectedVariant,
+    List<dynamic> variantCombinations,
+    Map<String, dynamic> json,
+  ) {
+    if (selectedVariant != null) return selectedVariant;
+    if (json['in_stock'] != null || json['quantity_available'] != null) return json;
+    if (variantCombinations.isNotEmpty && variantCombinations.first is Map) {
+      return variantCombinations.first as Map<String, dynamic>;
+    }
+    return null;
+  }
+
+  /// Initial stock from selected/first variant: in_stock && quantity_available > 0.
+  static bool _initialInStock(Map<String, dynamic>? variant) {
+    if (variant == null) return true;
+    final inStock = variant['in_stock'] == true;
+    final qtyRaw = variant['quantity_available'];
+    final qty = qtyRaw is num
+        ? qtyRaw.toDouble()
+        : (qtyRaw is String ? double.tryParse(qtyRaw) ?? 0.0 : 0.0);
+    return inStock && qty > 0;
+  }
+
+  /// Initial quantity available from selected/first variant.
+  static int? _initialQuantityAvailable(Map<String, dynamic>? variant) {
+    if (variant == null) return null;
+    final qtyRaw = variant['quantity_available'];
+    if (qtyRaw == null) return null;
+    final qty = qtyRaw is num
+        ? qtyRaw.toDouble()
+        : (qtyRaw is String ? double.tryParse(qtyRaw) : null);
+    return qty != null ? qty.toInt() : null;
   }
 
   // Helper methods for safe parsing

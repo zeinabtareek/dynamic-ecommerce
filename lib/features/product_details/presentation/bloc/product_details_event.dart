@@ -99,15 +99,18 @@ class FilterVariantsByAttributeEvent extends ProductDetailsEvent {
   final String productId;
   final String attributeName;
   final String attributeValue;
+  /// Attribute value id (from VariantAttributeValue.id) for attribute_value_combinations flow.
+  final String? attributeValueId;
 
   const FilterVariantsByAttributeEvent({
     required this.productId,
     required this.attributeName,
     required this.attributeValue,
+    this.attributeValueId,
   });
 
   @override
-  List<Object?> get props => [productId, attributeName, attributeValue];
+  List<Object?> get props => [productId, attributeName, attributeValue, attributeValueId];
 }
 
 /// Explicitly select a concrete variant by its `variantId` and update images/UI.

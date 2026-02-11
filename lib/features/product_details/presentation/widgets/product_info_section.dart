@@ -100,8 +100,21 @@ class ProductInfoSection extends StatelessWidget {
                         ),
                       ),
                       SizedBox(width: ResponsiveConstants.smSpacing),
-                      // Stock badge
-                      _StockBadge(productDetails: productDetails),
+                      // Stock badge - always from bloc so it updates on attribute change
+                      BlocBuilder<ProductDetailsBloc, ProductDetailsState>(
+                        buildWhen: (prev, curr) =>
+                            curr is ProductDetailsLoaded &&
+                            (prev is! ProductDetailsLoaded ||
+                                prev.productDetails.inStock != curr.productDetails.inStock ||
+                                prev.productDetails.selectedVariantQuantityAvailable !=
+                                    curr.productDetails.selectedVariantQuantityAvailable),
+                        builder: (context, state) {
+                          if (state is ProductDetailsLoaded) {
+                            return _StockBadge(productDetails: state.productDetails);
+                          }
+                          return _StockBadge(productDetails: productDetails);
+                        },
+                      ),
                     ],
                   ),
 
@@ -747,45 +760,20 @@ Widget _buildFullWidthAttributeButtons({
       attrNameLower != 'color name' &&
       attrNameLower != 'اللون';
 
-  // CRITICAL: Get all enabled attribute values for the selected color
-  // This filters variants by color + stock conditions and collects all attribute values
-  final Map<String, Set<String>> enabledAttributesForColor = 
-      productDetails.variantCombinations.isNotEmpty &&
-      productDetails.selectedColor.isNotEmpty
-      ? productDetails.getEnabledAttributeValuesForColor(productDetails.selectedColor)
-      : <String, Set<String>>{};
-
-  // Get the enabled values for this specific attribute
-  // Try multiple attribute name variations to match (case-insensitive)
+  // Enabled values for this attribute now come directly from the backend‑
+  // provided availability on each value, instead of recomputing via a
+  // color‑based loop. We simply respect `isAvailable` on each value.
   Set<String> enabledValuesForThisAttribute = {};
   String norm(String s) => s.toLowerCase().trim();
-  final normalizedAttrName = norm(attributeName);
-  
-  for (final entry in enabledAttributesForColor.entries) {
-    final normalizedEntryName = norm(entry.key);
-    // Match by exact name or if attribute name contains the entry key or vice versa
-    // Also handle common variations like "MATERIAL NAME" vs "MATERIALS", "MATERIAL" vs "MATERIAL NAME"
-    final bool nameMatches = normalizedEntryName == normalizedAttrName ||
-        normalizedEntryName.contains(normalizedAttrName) ||
-        normalizedAttrName.contains(normalizedEntryName);
-    
-    // Special handling for material attributes
-    final bool isMaterialMatch = 
-        (normalizedEntryName.contains('material') && normalizedAttrName.contains('material')) ||
-        (normalizedEntryName == 'materials' && normalizedAttrName == 'material name') ||
-        (normalizedEntryName == 'material name' && normalizedAttrName == 'materials');
-    
-    if (nameMatches || isMaterialMatch) {
-      // Normalize all values for comparison
-      enabledValuesForThisAttribute = entry.value.map((v) => norm(v)).toSet();
-      debugPrint('✅ Matched attribute "${entry.key}" with UI attribute "$attributeName" → enabled values: ${enabledValuesForThisAttribute.toList()}');
-      break;
-    }
-  }
+  enabledValuesForThisAttribute = values
+      .where((v) => (v as VariantAttributeValue).isAvailable)
+      .map((v) => norm((v as VariantAttributeValue).name))
+      .toSet();
 
   // Auto-select first enabled value if no value is currently selected
   // This happens when color changes and we need to select from available options
   String? valueToAutoSelect;
+  final normalizedAttrName = norm(attributeName);
   if (enabledValuesForThisAttribute.isNotEmpty) {
     // Check if current selection is still enabled
     String? currentSelectedValue;
@@ -841,59 +829,56 @@ Widget _buildFullWidthAttributeButtons({
         // If color is selected but there are no enabled values at all,
         // effectiveIsAvailable stays false → all buttons disabled.
 
-        // Selection rule:
-        // - CRITICAL: Prioritize valueToAutoSelect (from loop) for ALL attributes.
-        //   This ensures values from the matched variant are always selected.
-        // - For SIZE: fall back to current selectedSize if valueToAutoSelect is not set.
-        // - For other attributes: fall back to BLoC's selection if valueToAutoSelect is not set.
+        // Current selection for this attribute (from BLoC state)
+        String? currentSelectedForAttr;
+        if (isSizeAttribute && productDetails.selectedSize.isNotEmpty) {
+          currentSelectedForAttr = productDetails.selectedSize;
+        } else {
+          for (final opt in productDetails.variantAttributeOptions) {
+            if (norm(opt.attributeName) == normalizedAttrName &&
+                opt.selectedValue.isNotEmpty) {
+              currentSelectedForAttr = opt.selectedValue;
+              break;
+            }
+          }
+        }
+        final bool isSelectedFromState = currentSelectedForAttr != null &&
+            norm(val.name) == norm(currentSelectedForAttr);
+
+        // Selection rule: Selected value must ALWAYS show selected style (never greyed).
         bool isSelected = false;
         
-        // Priority 1: If valueToAutoSelect is set and this value matches it, select it
         if (valueToAutoSelect != null) {
           final normalizedAutoSelect = norm(valueToAutoSelect!);
           final normalizedValName = norm(val.name);
           if (normalizedValName == normalizedAutoSelect &&
               enabledValuesForThisAttribute.contains(normalizedAutoSelect)) {
             isSelected = true;
-            debugPrint('✅ Auto-selecting "$normalizedValName" for attribute "$attributeName" (from loop)');
           }
         }
         
-        // Priority 2: If not auto-selected, check current selection
         if (!isSelected) {
           if (isSizeAttribute) {
-            // For SIZE: Use current selectedSize if still enabled
             if (productDetails.selectedSize.isNotEmpty &&
-                enabledValuesForThisAttribute
-                    .contains(norm(productDetails.selectedSize)) &&
                 norm(val.name) == norm(productDetails.selectedSize)) {
               isSelected = true;
             }
           } else {
-            // For non-SIZE: Use BLoC's selection if still enabled
-            if ((val.isSelected || shouldForceSelectedForSingleOption) &&
-                effectiveIsAvailable) {
+            if (val.isSelected || shouldForceSelectedForSingleOption) {
               isSelected = true;
             }
           }
         }
 
-        // If this value is not enabled for the current color, it must NOT
-        // appear as selected even if BLoC still marks it selected.
-        if (!effectiveIsAvailable) {
-          isSelected = false;
+        // Selected value from state always shows as selected (fixes Size 40 etc. appearing disabled).
+        if (isSelectedFromState) {
+          isSelected = true;
         }
 
-        // Interaction rule:
-        // - Unclickable when already selected OR not enabled for current color.
-        //   We still keep the "no meaningful alternative" UX, but that no longer
-        //   affects the visual state of the *enabled* selected value.
         final bool isTapEnabled = !isSelected && effectiveIsAvailable;
 
-        // Grey disabled look purely based on effective availability.
-        // If a value is not part of the enabled set for this color, it is
-        // fully disabled even if BLoC had it selected before.
-        final bool showDisabledVisual = !effectiveIsAvailable;
+        // Never grey out the selected value - it must always show selected (orange) style.
+        final bool showDisabledVisual = !effectiveIsAvailable && !isSelectedFromState;
         final bool isEnabledChoice =
             !showDisabledVisual && effectiveIsAvailable == true;
 
@@ -919,6 +904,7 @@ Widget _buildFullWidthAttributeButtons({
                           productId: productDetails.id,
                           attributeName: attributeName,
                           attributeValue: val.name,
+                          attributeValueId: val.id,
                         ),
                       );
                     }
@@ -989,106 +975,12 @@ class _StockBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // CRITICAL: Use the matched variant from the loop for stock badge.
-    // When a color is selected, get the first in-stock variant for that color
-    // and use its stock info directly.
+    // Use BLoC-computed values only (single source of truth).
     bool inStock = productDetails.inStock;
-    int? q = productDetails.selectedVariantQuantityAvailable;
-    
-    // If color is selected, use the matched variant from the loop
-    if (productDetails.selectedColor.isNotEmpty &&
-        productDetails.variantCombinations.isNotEmpty) {
-      final matchedVariant =
-          productDetails.getFirstInStockVariantForColor(productDetails.selectedColor);
-      if (matchedVariant != null) {
-        // Use stock info from the matched variant
-        inStock = matchedVariant.inStock;
-        final double? qty = matchedVariant.quantityAvailable;
-        if (qty != null) {
-          q = qty.toInt();
-          // If quantity is 0, mark as out of stock
-          if (q <= 0) {
-            inStock = false;
-          }
-        } else {
-          // If quantity is null but inStock is true, consider it available
-          inStock = matchedVariant.inStock;
-        }
-      } else {
-        // No matching variant found for this color → out of stock
-        inStock = false;
-        q = 0;
-      }
-    } else {
-      // Fallback to BLoC-computed values when no color is selected
-      if (q != null && q <= 0) {
-        inStock = false;
-      }
-    }
-    // Fallback: when bloc didn't set quantity, if the variant matching this product id has 0 stock, show Out of stock
-    if (q == null && productDetails.variantCombinations.isNotEmpty && productDetails.id.isNotEmpty) {
-      try {
-        final variantForProduct = productDetails.variantCombinations.firstWhere(
-          (c) => c.variantId == productDetails.id,
-        );
-        if ((variantForProduct.quantityAvailable != null && variantForProduct.quantityAvailable! <= 0) ||
-            !variantForProduct.inStock) {
-          inStock = false;
-        }
-      } catch (_) {}
-    }
-    bool low = false;
-    if (q != null) {
-      low = q > 0 && q <= 5;
-    } else if (productDetails.variantCombinations.isNotEmpty) {
-      // Fallback: resolve variant for low stock when bloc didn't set quantity
-      String normalize(String s) => s.toLowerCase().trim();
-      String? selectedSize;
-      for (final opt in productDetails.variantAttributeOptions) {
-        final attrNameLower = opt.attributeName.toLowerCase();
-        if ((attrNameLower == 'size' || attrNameLower == productDetails.primaryVariantLabel.toLowerCase()) &&
-            opt.selectedValue.isNotEmpty) {
-          selectedSize = opt.selectedValue;
-          break;
-        }
-      }
-      selectedSize ??= productDetails.selectedSize.isNotEmpty ? productDetails.selectedSize : null;
-      String? selectedColor;
-      for (final opt in productDetails.variantAttributeOptions) {
-        final attrNameLower = opt.attributeName.toLowerCase();
-        if ((attrNameLower == 'color name' || attrNameLower == 'color' || attrNameLower == 'colour' || attrNameLower == 'اللون') &&
-            opt.selectedValue.isNotEmpty) {
-          selectedColor = opt.selectedValue;
-          break;
-        }
-      }
-      selectedColor ??= productDetails.selectedColor.isNotEmpty ? productDetails.selectedColor : null;
-      String? getVariantColorValue(VariantCombination v) {
-        for (final attrName in ['COLOR NAME', 'color name', 'Color Name', 'color', 'Color', 'COLOR', 'colour', 'Colour', 'اللون', 'لون']) {
-          final value = v.getAttributeValue(attrName);
-          if (value != null && value.isNotEmpty) return value;
-        }
-        return null;
-      }
-      if (selectedSize != null && selectedColor != null) {
-        final flexibleMatch = productDetails.variantCombinations.where((combo) {
-          final sizeMatch = combo.hasAttributeValue('SIZE', selectedSize!) ||
-              combo.hasAttributeValue('size', selectedSize) ||
-              combo.hasAttributeValue(productDetails.primaryVariantLabel, selectedSize);
-          final variantColorName = getVariantColorValue(combo);
-          if (variantColorName == null) return false;
-          final nv = normalize(variantColorName);
-          final ns = normalize(selectedColor!);
-          final colorMatch = nv == ns || nv.contains(ns) || ns.contains(nv);
-          return sizeMatch && colorMatch;
-        }).toList();
-        if (flexibleMatch.isNotEmpty) {
-          flexibleMatch.sort((a, b) => (b.quantityAvailable ?? 0).compareTo(a.quantityAvailable ?? 0));
-          final qa = flexibleMatch.first.quantityAvailable;
-          low = qa != null && qa > 0 && qa <= 5;
-        }
-      }
-    }
+    final int? q = productDetails.selectedVariantQuantityAvailable;
+    if (q != null && q <= 0) inStock = false;
+
+    final bool low = q != null && q > 0 && q <= 5;
 
     final Color bg = inStock
         ? (low ? Colors.orange.shade600 : Colors.green.shade600)

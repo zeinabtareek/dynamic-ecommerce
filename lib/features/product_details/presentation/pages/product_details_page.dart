@@ -124,6 +124,13 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
     return Scaffold(
       backgroundColor: colorScheme.background,
       body: BlocConsumer<ProductDetailsBloc, ProductDetailsState>(
+        buildWhen: (prev, curr) {
+          if (curr is! ProductDetailsLoaded) return curr != prev;
+          if (prev is! ProductDetailsLoaded) return true;
+          return prev.productDetails != curr.productDetails ||
+              prev.quantity != curr.quantity ||
+              prev.isAdding != curr.isAdding;
+        },
         listener: (context, state) {
           // Update variant images whenever product details change
           if (state is ProductDetailsLoaded) {
@@ -224,30 +231,21 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
         },
       ),
       bottomNavigationBar: BlocBuilder<ProductDetailsBloc, ProductDetailsState>(
+        buildWhen: (prev, curr) {
+          if (curr is! ProductDetailsLoaded) return curr != prev;
+          if (prev is! ProductDetailsLoaded) return true;
+          // Rebuild when stock changes so Add to Cart button updates
+          return prev.productDetails.inStock != curr.productDetails.inStock ||
+              prev.productDetails.selectedVariantQuantityAvailable !=
+                  curr.productDetails.selectedVariantQuantityAvailable ||
+              prev.productDetails != curr.productDetails;
+        },
         builder: (context, state) {
           if (state is ProductDetailsLoaded) {
             final pd = state.productDetails;
-            final bool isAvailable = _isProductInStock(pd);
-            final hasMatchingVariantId = _matchedVariantIds.isNotEmpty;
-            debugPrint(
-                '🧪 ProductDetailsPage bottom bar → variantIds=${pd.variantCombinations.map((v) => v.variantId).toList()}');
-            debugPrint(
-              '🧪 ProductDetailsPage bottom bar → hasMatchingVariantId=$hasMatchingVariantId '
-              'for productId=${widget.productId}, matchedVariantIds=$_matchedVariantIds',
-            );
-
-            // Derive stock for the currently selected color using the same loop
-            // logic used by the badge / bottom sheet.
-            bool variantInStock = isAvailable;
-            if (pd.selectedColor.isNotEmpty &&
-                pd.variantCombinations.isNotEmpty) {
-              final matchedVariant =
-                  pd.getFirstInStockVariantForColor(pd.selectedColor);
-              // getFirstInStockVariantForColor only returns variants with
-              // inStock == true && quantityAvailable > 0. If null → out of stock.
-              variantInStock = matchedVariant != null;
-            }
-            final bool isOutOfStock = !variantInStock;
+            // Use BLoC-computed inStock (from attribute_value_combinations or model).
+            // Matches badge and bottom sheet; considers full selection (color, size, material, etc.).
+            final bool isOutOfStock = !pd.inStock;
 
             return Container(
               padding: EdgeInsets.symmetric(
