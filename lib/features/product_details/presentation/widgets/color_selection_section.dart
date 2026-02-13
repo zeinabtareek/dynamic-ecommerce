@@ -148,31 +148,21 @@ class _ColorOptionCard extends StatelessWidget {
     return null;
   }
 
-  /// Check if this color is available for the currently selected size
-  /// This checks availability dynamically based on the current size selection
+  /// Check if this color is available for the currently selected size.
+  /// Uses entity methods so English and Arabic work the same (locale-agnostic).
   bool _isAvailableForCurrentSize() {
-    // If no variant combinations exist, assume available (fallback)
-    if (productDetails.variantCombinations.isEmpty) {
-      return true;
-    }
-    
-    // Get the English color name for matching
-    final englishColorName = _getEnglishColorName();
-    if (englishColorName == null || englishColorName.isEmpty) {
-      return true; // Default to available if we can't determine
-    }
-    
-    String normalize(String s) => s.toLowerCase().trim();
-    
-    // Get the currently selected size
+    if (productDetails.variantCombinations.isEmpty) return true;
+    final colorName = colorOption.displayNameOrName;
+    if (colorName.isEmpty) return true;
+
     String? selectedSize;
     for (final opt in productDetails.variantAttributeOptions) {
       final attrNameLower = opt.attributeName.toLowerCase();
-      if ((attrNameLower == 'size' || 
-           attrNameLower == productDetails.primaryVariantLabel.toLowerCase() ||
-           attrNameLower.contains('size') ||
-           attrNameLower.contains('قياس') ||
-           attrNameLower.contains('مقاس')) && 
+      if ((attrNameLower == 'size' ||
+              attrNameLower == productDetails.primaryVariantLabel.toLowerCase() ||
+              attrNameLower.contains('size') ||
+              attrNameLower.contains('قياس') ||
+              attrNameLower.contains('مقاس')) &&
           opt.selectedValue.isNotEmpty) {
         selectedSize = opt.selectedValue;
         break;
@@ -181,71 +171,27 @@ class _ColorOptionCard extends StatelessWidget {
     if (selectedSize == null && productDetails.selectedSize.isNotEmpty) {
       selectedSize = productDetails.selectedSize;
     }
-    
-    // Helper to get color value from variant
-    String? getVariantColorValue(VariantCombination v) {
-      final colorAttrNames = ['COLOR NAME', 'color name', 'Color Name', 'color', 'Color', 'COLOR', 'colour', 'Colour', 'اللون', 'لون'];
-      for (final attrName in colorAttrNames) {
-        final value = v.getAttributeValue(attrName);
-        if (value != null && value.isNotEmpty) {
-          return value;
-        }
-      }
-      return null;
+
+    if (selectedSize == null || selectedSize.isEmpty) {
+      return productDetails.hasAnyInStockVariantForColor(colorName);
     }
-    
-    // Check if this color-size combination is in stock
-    if (selectedSize != null && selectedSize.isNotEmpty) {
-      // Size is selected - check if this color has stock with this size
-      for (final v in productDetails.variantCombinations) {
-        final bool sizeMatch = v.hasAttributeValue('SIZE', selectedSize) ||
-                             v.hasAttributeValue('size', selectedSize) ||
-                             v.hasAttributeValue(productDetails.primaryVariantLabel, selectedSize);
-        if (!sizeMatch) continue;
-        
-        final variantColorName = getVariantColorValue(v);
-        if (variantColorName == null) continue;
-        
-        final normalizedVariant = normalize(variantColorName);
-        final normalizedColor = normalize(englishColorName);
-        
-        final bool colorMatch = normalizedVariant == normalizedColor ||
-                              normalizedVariant.contains(normalizedColor) ||
-                              normalizedColor.contains(normalizedVariant);
-        
-        if (colorMatch) {
-          final qty = v.quantityAvailable ?? 0.0;
-          final isInStock = v.inStock && qty > 0;
-          if (isInStock) {
-            return true; // Found in-stock variant for this color-size combination
-          }
-        }
+    const sizeAttrNames = ['SIZE', 'size', 'Size', 'القياس', 'قياس', 'مقاس'];
+    for (final attrName in sizeAttrNames) {
+      if (productDetails.hasInStockVariantForColorAndAttributeValue(
+        colorName: colorName,
+        attributeName: attrName,
+        valueName: selectedSize)) {
+        return true;
       }
-      // No in-stock variant found for this color-size combination
-      return false;
-    } else {
-      // No size selected - check if color has any in-stock variants at all
-      for (final v in productDetails.variantCombinations) {
-        final variantColorName = getVariantColorValue(v);
-        if (variantColorName == null) continue;
-        
-        final normalizedVariant = normalize(variantColorName);
-        final normalizedColor = normalize(englishColorName);
-        
-        final bool colorMatch = normalizedVariant == normalizedColor ||
-                              normalizedVariant.contains(normalizedColor) ||
-                              normalizedColor.contains(normalizedVariant);
-        
-        if (colorMatch) {
-          final qty = v.quantityAvailable ?? 0.0;
-          final isInStock = v.inStock && qty > 0;
-          if (isInStock) {
-            return true;
-          }
-        }
-      }
-      return false;
     }
+    if (productDetails.primaryVariantLabel.isNotEmpty &&
+        productDetails.hasInStockVariantForColorAndAttributeValue(
+          colorName: colorName,
+          attributeName: productDetails.primaryVariantLabel,
+          valueName: selectedSize)) {
+      return true;
+    }
+    return false;
   }
 
   /// Check if this color is available based on stock and current selections
@@ -434,31 +380,31 @@ class _ColorOptionCard extends StatelessWidget {
     return null;
   }
 
-  /// Get the first variant image for this color (English: use same color attr names + flexible match).
+  /// Get the first variant image for this color (locale-agnostic: entity matches Arabic/English).
   String _getColorImageUrl() {
-    final englishColorName = _getEnglishColorName();
-    if (englishColorName == null) {
+    final colorName = colorOption.displayNameOrName;
+    if (colorName.isEmpty) {
       return colorOption.images.isNotEmpty
           ? ImageCacheUtils.normalizeImageUrl(colorOption.images.first)
           : '';
     }
 
-    String normalize(String s) => s.toLowerCase().trim();
-    final nEnglish = normalize(englishColorName);
-
+    String norm(String s) => s.toLowerCase().trim();
     for (final v in productDetails.variantCombinations) {
       final variantColorName = _getVariantColorValue(v);
       if (variantColorName == null || variantColorName.isEmpty || v.variantId.isEmpty) continue;
-      final nV = normalize(variantColorName);
-      final colorMatch = nV == nEnglish || nV.contains(nEnglish) || nEnglish.contains(nV);
-      if (colorMatch) {
-        final list = productDetails.variantImagesMap[v.variantId];
-        if (list != null && list.isNotEmpty) {
-          return ImageCacheUtils.normalizeImageUrl(list.first);
-        }
-        final path = '/web/image/product.product/${v.variantId}/image_1920';
-        return ImageCacheUtils.normalizeImageUrl(path);
+      final matches = norm(variantColorName) == norm(colorName) ||
+          norm(variantColorName) == norm(colorOption.name) ||
+          (colorOption.displayName != null &&
+              colorOption.displayName!.isNotEmpty &&
+              norm(variantColorName) == norm(colorOption.displayName!));
+      if (!matches) continue;
+      final list = productDetails.variantImagesMap[v.variantId];
+      if (list != null && list.isNotEmpty) {
+        return ImageCacheUtils.normalizeImageUrl(list.first);
       }
+      final path = '/web/image/product.product/${v.variantId}/image_1920';
+      return ImageCacheUtils.normalizeImageUrl(path);
     }
 
     if (colorOption.images.isNotEmpty) {
@@ -478,7 +424,12 @@ class _ColorOptionCard extends StatelessWidget {
     final bool isDisabled = !isAvailable;
     final imageUrl = _getColorImageUrl();
     
-    debugPrint('🎨 ColorSelection Widget: "${colorOption.displayNameOrName}" - isAvailable from BLoC: $isAvailable');
+    if (isSelected) {
+      debugPrint(
+        '🔴 [ColorSelectionSection] Color SHOWING SELECTED: "${colorOption.displayNameOrName}" (id=${colorOption.id}) '
+        'isAvailable=$isAvailable - from colorOption.isSelected (BLoC state)',
+      );
+    }
 
     // Unclickable when: only one color, or only one available (no meaningful choice)
     final availableCount =

@@ -56,20 +56,6 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
 
   String _norm(String s) => s.toLowerCase().trim();
 
-  /// Normalize value to API key format (e.g. "PRINTED COVER" -> "printed-cover").
-  String _toValueKey(String value) =>
-      value.trim().toLowerCase().replaceAll(' ', '-');
-
-  /// Map attribute slug (from API) to normalized attribute name for matching.
-  String _attrSlugToNorm(String slug) {
-    final s = slug.toLowerCase();
-    if (s == 'materials' || s.contains('material')) return 'material';
-    if (s == 'size') return 'size';
-    if (s == 'color' || s == 'colour') return 'color';
-    if (s == 'height' || s.contains('heel')) return 'height';
-    return s;
-  }
-
   static bool _isColorAttributeKey(String key) {
     final k = key.toLowerCase();
     return k == 'color name' || k == 'color' || k == 'colour' || k == 'اللون' || k == 'لون';
@@ -134,365 +120,6 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
       if (sel.isNotEmpty && sel.first.id.trim().isNotEmpty) out['SIZE'] = sel.first.id.trim();
     }
     return out;
-  }
-
-  /// Collect currently selected attribute value ids from the product details
-  /// (color, size, and all dynamic variantAttributeOptions). These ids must
-  /// correspond to the ids used in `attribute_value_combinations` so that
-  /// [ProductDetails.resolveSelectionFromAttributeCombinations] can drive
-  /// availability and stock based on backend-provided combinations.
-  Set<int> _getSelectedAttributeValueIds(ProductDetails pd) {
-    final ids = <int>{};
-
-    // Color: use selected color option id if present.
-    try {
-      final selectedColorOpt =
-          pd.colorOptions.firstWhere((c) => c.isSelected, orElse: () => pd.colorOptions.first);
-      final colorId = int.tryParse(selectedColorOpt.id.toString());
-      if (colorId != null) ids.add(colorId);
-    } catch (_) {
-      // No color options or none selected – ignore.
-    }
-
-    // Size: use selected size option id if present.
-    try {
-      final selectedSizeOpt =
-          pd.sizeOptions.firstWhere((s) => s.isSelected, orElse: () => pd.sizeOptions.first);
-      final sizeId = int.tryParse(selectedSizeOpt.id.toString());
-      if (sizeId != null) ids.add(sizeId);
-    } catch (_) {
-      // No size options or none selected – ignore.
-    }
-
-    // Dynamic attributes: for each option, find the selected value and add its id.
-    for (final opt in pd.variantAttributeOptions) {
-      final selectedVal = opt.values.where((v) => v.isSelected).toList();
-      if (selectedVal.isEmpty) continue;
-      final rawId = selectedVal.first.id;
-      final parsedId = int.tryParse(rawId.toString());
-      if (parsedId != null) {
-        ids.add(parsedId);
-      }
-    }
-
-    return ids;
-  }
-
-  /// Build selected value ids with one attribute's value replaced.
-  /// Handles variant attributes (material, height), size, and color.
-  Set<int> _replaceAttributeValueInSelection(
-    ProductDetails pd,
-    String attributeName,
-    int newValueId,
-  ) {
-    final ids = Set<int>.from(_getSelectedAttributeValueIds(pd));
-    final attrNorm = _norm(attributeName);
-    final isSize = attrNorm == 'size' ||
-        attrNorm == pd.primaryVariantLabel.toLowerCase() ||
-        attrNorm == 'القياس';
-    final isColor = _isColorAttributeKey(attributeName);
-
-    // Remove current selection for this attribute.
-    if (isSize) {
-      for (final s in pd.sizeOptions) {
-        if (s.isSelected) {
-          final oldId = int.tryParse(s.id.toString());
-          if (oldId != null) ids.remove(oldId);
-          break;
-        }
-      }
-      for (final opt in pd.variantAttributeOptions) {
-        if (_norm(opt.attributeName) == attrNorm) {
-          for (final v in opt.values) {
-            if (v.isSelected) {
-              final oldId = int.tryParse(v.id.toString());
-              if (oldId != null) ids.remove(oldId);
-              break;
-            }
-          }
-          break;
-        }
-      }
-    } else if (isColor) {
-      for (final c in pd.colorOptions) {
-        if (c.isSelected) {
-          final oldId = int.tryParse(c.id.toString());
-          if (oldId != null) ids.remove(oldId);
-          break;
-        }
-      }
-    } else {
-      for (final opt in pd.variantAttributeOptions) {
-        if (_norm(opt.attributeName) == attrNorm) {
-          for (final v in opt.values) {
-            if (v.isSelected) {
-              final oldId = int.tryParse(v.id.toString());
-              if (oldId != null) ids.remove(oldId);
-              break;
-            }
-          }
-          break;
-        }
-      }
-    }
-    ids.add(newValueId);
-    return ids;
-  }
-
-  /// Sync selectedSize, selectedMaterial, selectedHeelHeightCm from variantAttributeOptions
-  /// so getSelectedValueSlugs() and matching see the correct selection after attribute click.
-  ProductDetails _syncSelectedFieldsFromVariantOptions(ProductDetails pd) {
-    String? newSize;
-    String? newMaterial;
-    double? newHeelHeight;
-    for (final opt in pd.variantAttributeOptions) {
-      if (opt.selectedValue.isEmpty) continue;
-      final n = _norm(opt.attributeName);
-      if (n == 'size' ||
-          n == pd.primaryVariantLabel.toLowerCase() ||
-          n == 'القياس') {
-        newSize = opt.selectedValue;
-      } else if (n.contains('material')) {
-        newMaterial = opt.selectedValue;
-      } else if (n == 'height' || n.contains('heel')) {
-        final numVal = double.tryParse(
-          opt.selectedValue.replaceAll(RegExp(r'[^0-9.]'), ''),
-        );
-        if (numVal != null) newHeelHeight = numVal;
-      }
-    }
-    return pd.copyWith(
-      selectedSize: newSize ?? pd.selectedSize,
-      selectedMaterial: newMaterial ?? pd.selectedMaterial,
-      selectedHeelHeightCm: newHeelHeight ?? pd.selectedHeelHeightCm,
-    );
-  }
-
-  /// Apply suggested selection (from combo's available_combination_values) to
-  /// variantAttributeOptions. Maps attr slug -> value slug to option selections.
-  /// [skipAttributeName] - do not overwrite selection for this attribute (keep user's click).
-  List<VariantAttributeOption> _applySuggestedSelection(
-    List<VariantAttributeOption> opts,
-    Map<String, String> suggestedSelection, {
-    String? skipAttributeName,
-  }) {
-    if (suggestedSelection.isEmpty) return opts;
-    final skipNorm = skipAttributeName != null ? _norm(skipAttributeName) : null;
-    return opts.map((opt) {
-      if (skipNorm != null && _norm(opt.attributeName) == skipNorm) return opt;
-      final optNorm = _attrSlugToNorm(_norm(opt.attributeName).replaceAll(' ', '-'));
-      String? suggestedValueSlug;
-      for (final e in suggestedSelection.entries) {
-        if (_attrSlugToNorm(e.key) == optNorm) {
-          suggestedValueSlug = e.value;
-          break;
-        }
-      }
-      if (suggestedValueSlug == null || suggestedValueSlug.isEmpty) return opt;
-      // Find value whose name normalizes to suggestedValueSlug
-      VariantAttributeValue? matched;
-      for (final v in opt.values) {
-        if (_toValueKey(v.name) == suggestedValueSlug) {
-          matched = v;
-          break;
-        }
-      }
-      if (matched == null) return opt;
-      final newValues = opt.values.map((v) {
-        return VariantAttributeValue(
-          id: v.id,
-          name: v.name,
-          isAvailable: v.isAvailable,
-          isSelected: v.id == matched!.id,
-        );
-      }).toList();
-      return VariantAttributeOption(
-        attributeName: opt.attributeName,
-        values: newValues,
-        selectedValue: matched.name,
-        apiAttributeName: opt.apiAttributeName,
-        attributeId: opt.attributeId,
-      );
-    }).toList();
-  }
-
-  /// Apply attribute_value_combinations flow: resolve selection, update availability
-  /// and stock. Returns updated ProductDetails and clamped quantity.
-  /// Set [updateImages] to true only when color changes (images come from variant).
-  /// Set [preserveStockWhenNoMatch] to true on initial load to keep model's inStock/qty from API.
-  /// Set [allAttributesEnabledOnInitial] to true on initial load so all attribute buttons are
-  /// enabled; after first click, availability is driven by attribute_value_combinations.
-  ({ProductDetails product, int quantity}) _applyAttributeCombinationsFlow(
-    ProductDetails pd,
-    Set<int> selectedValueIds,
-    int currentQuantity, {
-    bool updateImages = false,
-    bool preserveStockWhenNoMatch = false,
-    bool allAttributesEnabledOnInitial = false,
-  }) {
-    final selection = pd.resolveSelectionFromAttributeCombinations(selectedValueIds);
-    return _applyAttributeCombinationsFlowFromResult(
-      pd,
-      selection,
-      currentQuantity,
-      updateImages: updateImages,
-      preserveStockWhenNoMatch: preserveStockWhenNoMatch,
-      allAttributesEnabledOnInitial: allAttributesEnabledOnInitial,
-    );
-  }
-
-  /// Apply flow from AttributeSelectionResult (enabledIds, matchedVariant, suggestedSelection).
-  /// [skipSuggestedSelectionForAttribute] - keep user's clicked value, don't overwrite with combo.
-  ({ProductDetails product, int quantity}) _applyAttributeCombinationsFlowFromResult(
-    ProductDetails pd,
-    AttributeSelectionResult selection,
-    int currentQuantity, {
-    bool updateImages = false,
-    bool preserveStockWhenNoMatch = false,
-    bool allAttributesEnabledOnInitial = false,
-    String? skipSuggestedSelectionForAttribute,
-  }) {
-    final enabledIds = selection.enabledValueIds;
-    final matched = selection.matchedVariant;
-
-    debugPrint(
-      '📦 [attribute_value_combinations] Result: matchedVariant=${matched != null ? "variantId=${matched.variantId}, inStock=${matched.inStock}, quantityAvailable=${matched.quantityAvailable}" : "null"}, enabledValueIds=$enabledIds',
-    );
-
-    // Apply suggested selection from combo (attr values to select in UI)
-    var variantOpts = pd.variantAttributeOptions;
-    if (selection.suggestedSelection != null &&
-        selection.suggestedSelection!.isNotEmpty) {
-      variantOpts = _applySuggestedSelection(
-        variantOpts,
-        selection.suggestedSelection!,
-        skipAttributeName: skipSuggestedSelectionForAttribute,
-      );
-      debugPrint(
-        '📦 [attribute_value_combinations] Applied suggestedSelection: ${selection.suggestedSelection}',
-      );
-    }
-
-    // On initial load: all buttons enabled. After first attribute click: use enabledIds.
-    final bool useEnabledIds = !allAttributesEnabledOnInitial;
-
-    // Update availability for colors, sizes, variant attributes.
-    final updatedColorOptions = pd.colorOptions.map((c) {
-      final intId = int.tryParse(c.id.toString());
-      final isSelectedColor = _norm(c.name) == _norm(pd.selectedColor) ||
-          _norm(c.displayName ?? '') == _norm(pd.selectedColor);
-      final isAvailable = useEnabledIds
-          ? (intId != null && enabledIds.contains(intId)) || isSelectedColor
-          : true;
-      return ColorOption(
-        id: c.id,
-        name: c.name,
-        displayName: c.displayName,
-        code: c.code,
-        images: c.images,
-        isSelected: c.isSelected,
-        isAvailable: isAvailable,
-      );
-    }).toList();
-
-    final updatedSizeOptions = pd.sizeOptions.map((s) {
-      final intId = int.tryParse(s.id.toString());
-      final isSelectedSize = _norm(s.name) == _norm(pd.selectedSize);
-      final isAvailable = useEnabledIds
-          ? (intId != null && enabledIds.contains(intId)) || isSelectedSize
-          : true;
-      return SizeOption(
-        id: s.id,
-        name: s.name,
-        isAvailable: isAvailable,
-        isRecommended: s.isRecommended,
-        isSelected: s.isSelected,
-      );
-    }).toList();
-
-    final updatedVariantAttributeOptions = variantOpts.map((opt) {
-      final newValues = opt.values.map((v) {
-        final intId = int.tryParse(v.id.toString());
-        final isSelectedValue = _norm(v.name) == _norm(opt.selectedValue);
-        // Selected value must always be available - never disable the clicked attribute
-        final isAvailable = useEnabledIds
-            ? (intId != null && enabledIds.contains(intId)) || isSelectedValue
-            : true;
-        return VariantAttributeValue(
-          id: v.id,
-          name: v.name,
-          isAvailable: isAvailable,
-          isSelected: v.isSelected,
-        );
-      }).toList();
-      return VariantAttributeOption(
-        attributeName: opt.attributeName,
-        values: newValues,
-        selectedValue: opt.selectedValue,
-        apiAttributeName: opt.apiAttributeName,
-        attributeId: opt.attributeId,
-      );
-    }).toList();
-
-    int available = 0;
-    if (matched != null && matched.inStock && matched.quantityAvailable > 0) {
-      available = matched.quantityAvailable.toInt();
-      if (cartBloc.state is CartLoaded) {
-        final cartState = cartBloc.state as CartLoaded;
-        try {
-          final existingItem = cartState.cartItems.firstWhere(
-            (item) => item.product.id.toString() == matched.variantId.toString(),
-          );
-          available -= existingItem.quantity;
-        } catch (_) {}
-      }
-    }
-
-    final bool inStock = available > 0;
-    int nextQuantity = currentQuantity;
-    int? qtyForBadge;
-
-    if (matched != null) {
-      qtyForBadge = inStock ? available : null;
-      if (!inStock) {
-        nextQuantity = 1;
-      } else if (nextQuantity > available) {
-        nextQuantity = available;
-      }
-      if (nextQuantity <= 0) nextQuantity = 1;
-    } else if (preserveStockWhenNoMatch) {
-      // Keep model's values from API selected_variant (initial load).
-      qtyForBadge = pd.selectedVariantQuantityAvailable;
-      nextQuantity = currentQuantity;
-      if (pd.selectedVariantQuantityAvailable != null && currentQuantity > pd.selectedVariantQuantityAvailable!) {
-        nextQuantity = pd.selectedVariantQuantityAvailable!;
-      }
-    } else {
-      qtyForBadge = null;
-      nextQuantity = 1;
-    }
-
-    final bool finalInStock = matched != null
-        ? inStock
-        : (preserveStockWhenNoMatch ? pd.inStock : false);
-
-    debugPrint(
-      '📦 [attribute click] quantity_available: $qtyForBadge | inStock: $finalInStock',
-    );
-
-    var updated = pd.copyWith(
-      colorOptions: updatedColorOptions,
-      sizeOptions: updatedSizeOptions,
-      variantAttributeOptions: updatedVariantAttributeOptions,
-      inStock: finalInStock,
-      selectedVariantQuantityAvailable: qtyForBadge,
-    );
-
-    if (updateImages && matched != null) {
-      updated = updated.withImagesForVariant(matched.variantId.toString());
-    }
-
-    return (product: updated, quantity: nextQuantity);
   }
 
   /// Attribute value lookup from a variant combination.
@@ -620,6 +247,7 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         return VariantAttributeValue(
           id: value.id,
           name: value.name,
+          displayName: value.displayName,
           isAvailable: isAvailable,
           isSelected: isSelected,
         );
@@ -729,22 +357,6 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         }
       }
       
-      // Sync variantAttributeOptions so MATERIAL attribute has selectedValue = event.material.
-      // This ensures _findSelectedVariant receives the full selection (past + new) and finds the exact variant.
-      final updatedVariantAttributeOptions = p.variantAttributeOptions.map((opt) {
-        final attrLower = opt.attributeName.toLowerCase();
-        if (attrLower.contains('material') && opt.selectedValue != event.material) {
-          return VariantAttributeOption(
-            attributeName: opt.attributeName,
-            values: opt.values,
-            selectedValue: event.material,
-            apiAttributeName: opt.apiAttributeName,
-            attributeId: opt.attributeId,
-          );
-        }
-        return opt;
-      }).toList();
-
       var updated = ProductDetails(
         id: p.id,
         brand: p.brand,
@@ -757,7 +369,7 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         images: p.images,
         colorOptions: p.colorOptions,
         sizeOptions: p.sizeOptions,
-        variantAttributeOptions: updatedVariantAttributeOptions,
+        variantAttributeOptions: p.variantAttributeOptions,
         selectedColor: p.selectedColor,
         selectedSize: p.selectedSize,
         isFavorite: p.isFavorite,
@@ -898,23 +510,6 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         }
       }
       
-      // Sync variantAttributeOptions so HEIGHT attribute has selectedValue = event height.
-      // This ensures _findSelectedVariant receives the full selection (past + new) and finds the exact variant.
-      final updatedVariantAttributeOptions = p.variantAttributeOptions.map((opt) {
-        final attrLower = opt.attributeName.toLowerCase();
-        if ((attrLower == 'height' || attrLower.contains('heel')) &&
-            opt.selectedValue != heightStr) {
-          return VariantAttributeOption(
-            attributeName: opt.attributeName,
-            values: opt.values,
-            selectedValue: heightStr,
-            apiAttributeName: opt.apiAttributeName,
-            attributeId: opt.attributeId,
-          );
-        }
-        return opt;
-      }).toList();
-
       var updated = ProductDetails(
         id: p.id,
         brand: p.brand,
@@ -927,7 +522,7 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         images: p.images,
         colorOptions: p.colorOptions,
         sizeOptions: p.sizeOptions,
-        variantAttributeOptions: updatedVariantAttributeOptions,
+        variantAttributeOptions: p.variantAttributeOptions,
         selectedColor: p.selectedColor,
         selectedSize: p.selectedSize,
         isFavorite: p.isFavorite,
@@ -1009,6 +604,9 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
     }
   }
 
+  /// Handles attribute selection for ALL dynamic attributes (material, height, width, measurements, etc.).
+  /// This is the generic handler that works for any attribute added in the future.
+  /// Uses validation logic: loop with clicked id → get available combination → validate against full selection.
   Future<void> _onFilterVariantsByAttribute(
     FilterVariantsByAttributeEvent event,
     Emitter<ProductDetailsState> emit,
@@ -1018,103 +616,113 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
 
     final currentProduct = blocState.productDetails;
 
-    // No-op when user taps the already selected value (e.g. PRINTED COVER twice).
-    // Re-running recompute when selection did not change can leave all options
-    // greyed/hidden due to matching edge cases; keep state unchanged.
+    debugPrint('🔴 [FilterVariantsByAttribute] ═══════════════════════════════════════');
+    debugPrint('🔴 [FilterVariantsByAttribute] EVENT RECEIVED (USER TAPPED BUTTON)');
+    debugPrint('🔴 [FilterVariantsByAttribute] attributeName="${event.attributeName}" value="${event.attributeValue}" valueId=${event.attributeValueId}');
+    debugPrint('🔴 [FilterVariantsByAttribute] BEFORE state: selectedSize="${currentProduct.selectedSize}" selectedColor="${currentProduct.selectedColor}"');
     for (final opt in currentProduct.variantAttributeOptions) {
-      if (opt.attributeName.toLowerCase() == event.attributeName.toLowerCase()) {
-        if (opt.selectedValue.isNotEmpty &&
-            opt.selectedValue.toLowerCase().trim() == event.attributeValue.toLowerCase().trim()) {
-          debugPrint(
-            '🧩 FilterVariantsByAttributeEvent: same value already selected, skipping',
-          );
-          return;
-        }
-        break;
-      }
+      debugPrint('🔴 [FilterVariantsByAttribute]   attr="${opt.attributeName}" selectedValue="${opt.selectedValue}"');
     }
+    debugPrint('🔴 [FilterVariantsByAttribute] ═══════════════════════════════════════');
 
-    debugPrint(
-      '🧩 FilterVariantsByAttributeEvent: ${event.attributeName}="${event.attributeValue}"',
-    );
-
-    // Use attribute_value_combinations flow: send ONLY the clicked attribute value name.
-    // Lookup attribute_value_combinations[valueName], filter combos with stock > 0,
-    // get enabled attributes from available_combination_values, auto-select from best combo.
-    if (currentProduct.attributeValueCombinationsByKey.isNotEmpty) {
-      debugPrint(
-        '📦 [attribute_value_combinations] Sending ONLY clicked value name: "${event.attributeValue}"',
-      );
-      // Resolve by clicked value only (no set of values).
-      final selection = currentProduct.resolveSelectionByClickedValue(
-        event.attributeValue,
-      );
-      // Update clicked attribute in variantAttributeOptions.
-      var updatedPd = currentProduct;
-      final updatedOpts = currentProduct.variantAttributeOptions.map((opt) {
-        if (_norm(opt.attributeName) != _norm(event.attributeName)) return opt;
-        final newValues = opt.values.map((v) {
-          final isSelected = _norm(v.name) == _norm(event.attributeValue);
-          return VariantAttributeValue(
-            id: v.id,
-            name: v.name,
-            isAvailable: v.isAvailable,
-            isSelected: isSelected,
-          );
-        }).toList();
-        return VariantAttributeOption(
-          attributeName: opt.attributeName,
-          values: newValues,
-          selectedValue: event.attributeValue,
-          apiAttributeName: opt.apiAttributeName,
-          attributeId: opt.attributeId,
-        );
-      }).toList();
-      updatedPd = currentProduct.copyWith(variantAttributeOptions: updatedOpts);
-      // Apply flow: suggestedSelection auto-selects other attributes, but keep clicked attribute.
-      final result = _applyAttributeCombinationsFlowFromResult(
-        updatedPd,
-        selection,
-        blocState.quantity,
-        skipSuggestedSelectionForAttribute: event.attributeName,
-      );
-      final finalProduct = _syncSelectedFieldsFromVariantOptions(result.product);
-      emit(ProductDetailsLoaded(finalProduct, quantity: result.quantity, isAdding: false));
+    if (event.attributeValueId.trim().isEmpty) {
+      debugPrint('🟢 [_onFilterVariantsByAttribute] attributeValueId is empty, ignoring');
       return;
     }
-
+    final tappedValueId = event.attributeValueId.trim();
     debugPrint(
-      '   Current selections: size="${currentProduct.selectedSize}", color="${currentProduct.selectedColor}", '
-      'material="${currentProduct.selectedMaterial ?? ''}", height="${currentProduct.selectedHeelHeightCm?.toStringAsFixed(1) ?? ''}"',
+      '🟢 [_onFilterVariantsByAttribute] valueId=$tappedValueId (sent to loop)',
     );
+
+    // Find the option and value ONLY by value id (no name used for the loop).
+    VariantAttributeOption? tappedOption;
+    VariantAttributeValue? tappedValue;
+    for (final opt in currentProduct.variantAttributeOptions) {
+      for (final v in opt.values) {
+        if (v.id.toString().trim() == tappedValueId) {
+          tappedOption = opt;
+          tappedValue = v;
+          break;
+        }
+      }
+      if (tappedOption != null) break;
+    }
+    if (tappedOption == null || tappedValue == null) {
+      debugPrint('⚠️ [_onFilterVariantsByAttribute] No option/value found for valueId=$tappedValueId');
+      return;
+    }
+    final tappedAttrSlug = ProductDetails.attributeNameToComboSlug(tappedOption.attributeName);
+    debugPrint(
+      '   🧬 [Filter][Tap] attribute="${tappedOption.attributeName}" (slug=$tappedAttrSlug) valueId=$tappedValueId',
+    );
+
+    // Same value already selected? Check only by id.
+    try {
+      final currentSelected = tappedOption.values.firstWhere(
+        (v) => v.isSelected ||
+            _norm(v.name) == _norm(tappedOption!.selectedValue) ||
+            (v.displayName != null && _norm(v.displayName!) == _norm(tappedOption!.selectedValue)),
+      );
+      if (currentSelected.id.toString().trim() == tappedValueId) {
+        debugPrint('🧩 FilterVariantsByAttributeEvent: same value id already selected, skipping');
+        return;
+      }
+    } catch (_) {}
+
     debugPrint(
       '   Variants: count=${currentProduct.variantCombinations.length}',
     );
-    // Step 1: capture current selections and apply the new selection
-    final Map<String, String> selectedByAttribute = {};
-    for (final opt in currentProduct.variantAttributeOptions) {
-      selectedByAttribute[opt.attributeName] = opt.selectedValue;
+
+    // Step 1: Build selection by value IDs only (slug -> id). This is what we send to the loop.
+    final Map<String, int> selectedByAttributeById = {};
+    final tappedIdInt = int.tryParse(tappedValueId);
+    if (tappedIdInt != null) {
+      selectedByAttributeById[tappedAttrSlug] = tappedIdInt;
     }
-    selectedByAttribute[event.attributeName] = event.attributeValue;
-    // Ensure the option's key (e.g. "MATERIAL NAME") gets the new value even if event used API name (e.g. "MATERIALS")
     for (final opt in currentProduct.variantAttributeOptions) {
-      if (_norm(opt.attributeName) == _norm(event.attributeName) ||
-          (opt.apiAttributeName != null && opt.apiAttributeName!.isNotEmpty && _norm(opt.apiAttributeName!) == _norm(event.attributeName))) {
-        selectedByAttribute[opt.attributeName] = event.attributeValue;
-        break;
-      }
+      if (opt.attributeName == tappedOption.attributeName) continue; // already set
+      if (opt.selectedValue.isEmpty) continue;
+      try {
+        final matchedValue = opt.values.firstWhere(
+          (v) => _norm(v.name) == _norm(opt.selectedValue) ||
+              _norm(v.displayName ?? '') == _norm(opt.selectedValue) ||
+              v.isSelected,
+        );
+        final idInt = int.tryParse(matchedValue.id.toString());
+        if (idInt != null) {
+          final slug = ProductDetails.attributeNameToComboSlug(opt.attributeName);
+          if (slug.isNotEmpty) selectedByAttributeById[slug] = idInt;
+        }
+      } catch (_) {}
     }
     debugPrint(
-      '   selectedByAttribute(after)=$selectedByAttribute',
+      '   🧬 [Filter][Ids] selectedByAttributeById (slug->id, sent to loop) = $selectedByAttributeById',
     );
 
-    // Step 2: compute availability per attribute value using variant_combinations
-    // A value is available if there exists at least one variant that:
-    //  - matches ALL currently selected attribute values (excluding the attribute we are evaluating if it differs)
-    //  - and has this candidate value for the attribute being evaluated
+    // Derived name map only for variant_combinations fallback and debug (loop uses ids only).
+    final Map<String, String> selectedByAttribute = {};
+    for (final opt in currentProduct.variantAttributeOptions) {
+      String name = opt.selectedValue;
+      if (opt.attributeName == tappedOption.attributeName) {
+        name = tappedValue.name;
+      } else if (opt.selectedValue.isNotEmpty) {
+        try {
+          final v = opt.values.firstWhere(
+            (v) => _norm(v.name) == _norm(opt.selectedValue) ||
+                _norm(v.displayName ?? '') == _norm(opt.selectedValue) ||
+                v.isSelected,
+          );
+          name = v.name;
+        } catch (_) {}
+      }
+      if (name.isNotEmpty) selectedByAttribute[opt.attributeName] = name;
+    }
+
+    // Step 2: compute availability per attribute value using variant_combinations,
+    // and OR it with id-based availability from attribute_value_combinations.
     final List<VariantAttributeOption> recomputedOptions = [];
-    final bool eventIsForHeight = event.attributeName.toLowerCase().trim() == 'height' ||
-        event.attributeName.toLowerCase().trim() == 'heel height';
+    final bool eventIsForHeight = tappedOption.attributeName.toLowerCase().trim() == 'height' ||
+        tappedOption.attributeName.toLowerCase().trim() == 'heel height';
     for (final attrOption in currentProduct.variantAttributeOptions) {
       final String attributeName = attrOption.attributeName;
       final bool isHeightAttr = attributeName.toLowerCase() == 'height' || attributeName.toLowerCase() == 'heel height';
@@ -1135,8 +743,42 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         );
       }
 
+      // For the current attribute, fetch enabled ids/slugs from attribute_value_combinations (if present).
+      ({Set<int> ids, Set<String> slugs}) enabledFromAttrCombos = (ids: <int>{}, slugs: <String>{});
+      if (currentProduct.attributeVariantCombinations.isNotEmpty ||
+          currentProduct.attributeValueCombinationsByKey.isNotEmpty) {
+        try {
+          enabledFromAttrCombos =
+              currentProduct.getEnabledIdsAndSlugsForAttribute(
+            attributeName,
+            selectedByAttribute,
+            currentProduct.primaryVariantLabel,
+            selectedByAttributeById: selectedByAttributeById,
+          );
+          debugPrint(
+            '   🧬 [AttrCombos] attr="$attributeName": '
+            'enabledIds=${enabledFromAttrCombos.ids.toList()} '
+            'enabledSlugs=${enabledFromAttrCombos.slugs.toList()}',
+          );
+          if (attributeName == tappedOption.attributeName && tappedIdInt != null) {
+            debugPrint(
+              '   🧬 [AttrCombos] tappedId=$tappedValueId '
+              '→ inEnabledIds=${enabledFromAttrCombos.ids.contains(tappedIdInt)}',
+            );
+          }
+        } catch (e) {
+          debugPrint('⚠️ [AttrCombos] Error computing enabled ids for "$attributeName": $e');
+        }
+      }
+
       final List<VariantAttributeValue> newValues = attrOption.values.map((value) {
-        bool isAvailable = false;
+        // If attribute_value_combinations says this value id is enabled, we must
+        // NEVER disable this button in any scenario (Arabic & English behave the same).
+        final int? valueIdInt = int.tryParse(value.id.toString());
+        final bool guaranteedAvailableById = valueIdInt != null &&
+            enabledFromAttrCombos.ids.contains(valueIdInt);
+
+        bool isAvailable = guaranteedAvailableById;
         int matchesTried = 0;
         int matchesStock = 0;
 
@@ -1144,7 +786,7 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         final bool isHeightAttrForAvailability = attributeName.toLowerCase() == 'height' || attributeName.toLowerCase() == 'heel height';
         if (isHeightAttrForAvailability) {
           isAvailable = true; // Force height button to always be enabled (disabling logic commented out below)
-        } else {
+        } else if (!guaranteedAvailableById) {
         for (final combo in currentProduct.variantCombinations) {
           bool matchesSelections = true;
 
@@ -1216,15 +858,31 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
               if (!isCriticalAttribute(selAttr)) continue;
               
               // When evaluating availability, allow trying the candidate value for this attribute
-              final String mustMatchValue = selValue;
+              // CRITICAL: selectedByAttribute now contains English names, so matching should work
+              // For color attributes, use bilingual matching
+              final String mustMatchValue = selValue; // This is now English from selectedByAttribute
               final String? comboVal = _getComboValueForAttribute(
                 currentProduct,
                 combo,
                 selAttr,
               );
-              if (comboVal == null || comboVal.toLowerCase() != mustMatchValue.toLowerCase()) {
+              if (comboVal == null) {
                 matchesSelections = false;
                 break;
+              }
+              
+              // For color attributes, use bilingual matching
+              if (_isColorAttributeKey(selAttr)) {
+                if (!_colorValuesMatch(currentProduct, comboVal, mustMatchValue)) {
+                  matchesSelections = false;
+                  break;
+                }
+              } else {
+                // For other attributes, use exact match (both should be English)
+                if (_norm(comboVal) != _norm(mustMatchValue)) {
+                  matchesSelections = false;
+                  break;
+                }
               }
             }
           }
@@ -1253,7 +911,17 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
             }
           }
         }
-        } // end else: skip variant-combo availability loop for height
+
+        // If attribute_value_combinations already guaranteed this id, keep it available
+        // regardless of the per-variant loop outcome.
+        if (!isAvailable && guaranteedAvailableById) {
+          isAvailable = true;
+          debugPrint(
+            '   ✅ [AttrCombos] attr="$attributeName" value="${value.name}" (id=${value.id}) '
+            'forced available by attribute_value_combinations (id match)',
+          );
+        }
+        } // end else-if: skip variant-combo availability loop for height
 
         // For material: only preserve availability when the value was ALREADY available before
         // (so we don't enable e.g. Synthetic Leather when it's not available for this combination).
@@ -1284,7 +952,7 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         //   }
         // }
 
-        if (!isAvailable) {
+        if (!isAvailable && !guaranteedAvailableById) {
           // Very useful signal when everything becomes disabled:
           // it tells us whether it's selection mismatch or stock mismatch.
           if (isMaterialAttr) {
@@ -1301,16 +969,25 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
 
         // Selection: always show which value is selected (by name or id); only disable when no variant exists.
         // So selected chip stays selected (orange) even if that combo is out of stock; only unavailable chips are grey.
+        // CRITICAL: selectedByAttribute now contains English names, so compare with value.name (also English)
         final String? selVal = selectedByAttribute[attributeName];
         final bool selectedMatch = selVal != null && selVal.isNotEmpty &&
             (_norm(selVal) == _norm(value.name) || value.id.toString().trim() == selVal.trim());
-        final bool isJustTappedValue = event.attributeName.toLowerCase().trim() == attributeName.toLowerCase().trim() &&
-            (_norm(event.attributeValue) == _norm(value.name) || value.id.toString().trim() == event.attributeValue.trim());
+        // Tapped value is identified by id only (no name used)
+        final bool isJustTappedValue = (tappedOption?.attributeName == attributeName) &&
+            value.id.toString().trim() == tappedValueId;
+        // FINAL availability used for UI:
+        // - Never turn an originally-available value into unavailable.
+        // - Always keep values enabled when attribute_value_combinations says so.
+        final bool effectiveIsAvailable =
+            value.isAvailable || guaranteedAvailableById || isAvailable;
+
         final bool isSelected = selectedMatch || isJustTappedValue;
         return VariantAttributeValue(
           id: value.id,
           name: value.name,
-          isAvailable: isAvailable,
+          displayName: value.displayName,
+          isAvailable: effectiveIsAvailable,
           isSelected: isSelected,
         );
       }).toList();
@@ -1335,10 +1012,11 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
           newValues[0] = VariantAttributeValue(
             id: singleValue.id,
             name: singleValue.name,
+            displayName: singleValue.displayName,
             isAvailable: true, // Force available for single option
             isSelected: true, // Auto-select single option
           );
-          debugPrint('✅ Single option for ${attributeName}: "${singleValue.name}" - marked as available and selected');
+          debugPrint('🔴 [FilterVariantsByAttribute] AUTO-SELECT (no user tap): Single option for ${attributeName}: "${singleValue.name}" - marked as available and selected. selectedByAttribute["$attributeName"] = "${singleValue.name}"');
         }
         // Update selectedValue to match the single option
         selectedByAttribute[attributeName] = singleValue.name;
@@ -1366,11 +1044,39 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
       }
     }
 
+    // Debug: after recompute, log selected attributes by attribute_id (from variant_attributes)
+    try {
+      final debugProductForIds = currentProduct.copyWith(
+        variantAttributeOptions: recomputedOptions,
+      );
+      final byAttrId =
+          debugProductForIds.getSelectedAttributesByAttributeIdAndValueName();
+      debugPrint(
+        '   🧬 [Filter][AfterRecompute] attribute_id -> value_name = $byAttrId',
+      );
+    } catch (e) {
+      debugPrint('⚠️ [Filter][AfterRecompute] Error building attribute_id map: $e');
+    }
+
     // Step 3: matching variants for stock/availability (images update only on color change; do not set images here)
+    // CRITICAL: selectedByAttribute now contains English names, so matching should work correctly
+    // For color attributes, use bilingual matching to handle Arabic display names
     final matching = currentProduct.variantCombinations.where((combo) {
       for (final entry in selectedByAttribute.entries) {
         final v = _getComboValueForAttribute(currentProduct, combo, entry.key);
-        if (v == null || v.toLowerCase() != entry.value.toLowerCase()) return false;
+        if (v == null) return false;
+        
+        // For color attributes, use bilingual matching (handles Arabic display names)
+        if (_isColorAttributeKey(entry.key)) {
+          if (!_colorValuesMatch(currentProduct, v, entry.value)) {
+            return false;
+          }
+        } else {
+          // For other attributes, use exact match (both should be English now)
+          if (_norm(v) != _norm(entry.value)) {
+            return false;
+          }
+        }
       }
       return true;
     }).toList();
@@ -1379,54 +1085,289 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
     // CRITICAL: When event is for HEIGHT/MATERIAL (non-size), preserve current size.
     // Otherwise size can wrongly change (e.g. 39→40) due to attribute ordering or
     // multiple attributes matching the size condition.
+    // CRITICAL: Use English names (value.name) from selected value, not selectedValue which might be Arabic
     String newSelectedSize = currentProduct.selectedSize;
     String newSelectedColor = currentProduct.selectedColor;
-    final isSizeChangeEvent = event.attributeName.toLowerCase() == 'size' ||
-        event.attributeName.toLowerCase() == currentProduct.primaryVariantLabel.toLowerCase() ||
-        event.attributeName.toLowerCase().contains('size');
+    final isSizeChangeEvent = tappedOption.attributeName.toLowerCase() == 'size' ||
+        tappedOption.attributeName.toLowerCase() == currentProduct.primaryVariantLabel.toLowerCase() ||
+        tappedOption.attributeName.toLowerCase().contains('size');
+
+    debugPrint('🔴 [FilterVariantsByAttribute] Step 4 BEFORE loop: newSelectedSize="$newSelectedSize" newSelectedColor="$newSelectedColor" isSizeChangeEvent=$isSizeChangeEvent (tapped="${tappedOption.attributeName}")');
 
     for (final opt in recomputedOptions) {
       if (opt.attributeName.toLowerCase() == currentProduct.primaryVariantLabel.toLowerCase() ||
           opt.attributeName.toLowerCase() == 'size') {
         if (isSizeChangeEvent) {
-          newSelectedSize = opt.selectedValue;
+          // Find the English name for the selected value
+          String englishSizeName = opt.selectedValue;
+          if (opt.selectedValue.isNotEmpty) {
+            try {
+              final matchedValue = opt.values.firstWhere(
+                (v) => v.isSelected || _norm(v.name) == _norm(opt.selectedValue) || 
+                       _norm(v.displayName ?? '') == _norm(opt.selectedValue),
+              );
+              englishSizeName = matchedValue.name; // Use English name
+            } catch (e) {
+              // If not found, check if selectedValue is already English
+              bool containsArabic(String text) {
+                if (text.isEmpty) return false;
+                final arabicRegex = RegExp(r'[\u0600-\u06FF]');
+                return arabicRegex.hasMatch(text);
+              }
+              if (!containsArabic(opt.selectedValue)) {
+                englishSizeName = opt.selectedValue; // Already English
+              }
+            }
+          }
+          newSelectedSize = englishSizeName;
         }
         // When changing height/material: keep currentProduct.selectedSize unchanged
       }
       if (['color','colour','اللون','color name'].contains(opt.attributeName.toLowerCase())) {
-        newSelectedColor = opt.selectedValue;
+        // Find the English name for the selected color value
+        String englishColorName = opt.selectedValue;
+        if (opt.selectedValue.isNotEmpty) {
+          try {
+            final matchedValue = opt.values.firstWhere(
+              (v) => v.isSelected || _norm(v.name) == _norm(opt.selectedValue) || 
+                     _norm(v.displayName ?? '') == _norm(opt.selectedValue),
+            );
+            englishColorName = matchedValue.name; // Use English name
+          } catch (e) {
+            // If not found, check if selectedValue is already English
+            bool containsArabic(String text) {
+              if (text.isEmpty) return false;
+              final arabicRegex = RegExp(r'[\u0600-\u06FF]');
+              return arabicRegex.hasMatch(text);
+            }
+            if (!containsArabic(opt.selectedValue)) {
+              englishColorName = opt.selectedValue; // Already English
+            }
+          }
+        }
+        newSelectedColor = englishColorName;
+        debugPrint('🔴 [FilterVariantsByAttribute] Step 4 IN LOOP: color opt "${opt.attributeName}" selectedValue="${opt.selectedValue}" → newSelectedColor="$englishColorName"');
       }
     }
 
+    debugPrint('🔴 [FilterVariantsByAttribute] Step 4 AFTER loop: newSelectedSize="$newSelectedSize" newSelectedColor="$newSelectedColor"');
+    if (newSelectedSize != currentProduct.selectedSize || newSelectedColor != currentProduct.selectedColor) {
+      debugPrint('🔴 [FilterVariantsByAttribute] ⚠️ SELECTION CHANGED WITHOUT USER TAP! size: "${currentProduct.selectedSize}" → "$newSelectedSize", color: "${currentProduct.selectedColor}" → "$newSelectedColor"');
+    }
+
     // Step 5: update overall availability based on the *currently selected* combination.
-    // If there is no variant that matches all selected attributes (size, color, etc.),
-    // we must treat the current combination as out of stock even if other variants exist.
+    // Prefer the normalized attribute_value_combinations (attributeVariantCombinations)
+    // for in_stock + quantity_available when available, so every attribute click
+    // updates stock from the same filter source used for enabling values.
     bool newInStock;
-    if (matching.isEmpty) {
-      // No variant matches the current selection → this combination is out of stock.
-      newInStock = false;
-      debugPrint(
-        '📦 No matching variants for current selection (size="$newSelectedSize", color="$newSelectedColor"). '
-        'Marking inStock = false for this combination.',
-      );
+    AttributeVariantCombination? matchedAttrCombo;
+
+    if (currentProduct.attributeVariantCombinations.isNotEmpty ||
+        currentProduct.attributeValueCombinationsByKey.isNotEmpty) {
+      try {
+        // Step 1: Send only the clicked attribute value id to the loop; get available combination.
+        debugPrint(
+          '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+        );
+        debugPrint(
+          '🎯 [FilterVariantsByAttribute] Attribute: "${tappedOption.attributeName}" | Selected ID: $tappedValueId',
+        );
+        debugPrint(
+          '📤 [Send to Loop] Clicked attribute value id: $tappedValueId',
+        );
+        final comboFromLoop = currentProduct.findMatchingComboByClickedValueId(tappedValueId);
+        debugPrint(
+          '📥 [Get from Loop] Matched: ${comboFromLoop != null} | Variant ID: ${comboFromLoop?.variantId}',
+        );
+
+        if (comboFromLoop != null) {
+          // Step 2: Extract available combination ids from the combo (list of value ids in this combo).
+          final availableCombinationIds = comboFromLoop.values.map((v) => v.id).toSet();
+          debugPrint(
+            '📋 [Available Combination IDs] From loop response: $availableCombinationIds',
+          );
+          // Show detailed breakdown of each attribute in the combo
+          debugPrint(
+            '   📋 [Combo Details]',
+          );
+          for (final comboVal in comboFromLoop.values) {
+            final attrSlug = ProductDetails.attributeNameToComboSlug(
+              comboVal.value.split('-').first.trim(),
+            );
+            debugPrint(
+              '      - Attribute: $attrSlug | Value ID: ${comboVal.id} | Value: "${comboVal.value}"',
+            );
+          }
+
+          // Step 3: Normalize ONLY the clicked attribute id from combo - don't change other attributes.
+          // This ensures only the clicked attribute is updated, other attributes stay as user selected them.
+          var productWithNewSelection = currentProduct.copyWith(variantAttributeOptions: recomputedOptions);
+          productWithNewSelection = _normalizeAttributeIdsFromCombo(productWithNewSelection, comboFromLoop, clickedAttributeSlug: tappedAttrSlug);
+
+          // Step 4: Get full current selection (all selected attribute ids) with normalized ids.
+          // Build selection that includes ALL attributes from combo, even if selectedValue is empty.
+          final fullSelection = productWithNewSelection.getSelectedAttributeSlugToValueId();
+          // Also include attributes from combo that might not be in selectedValue (use isSelected flag)
+          final comboBasedSelection = <String, int>{};
+          for (final comboVal in comboFromLoop.values) {
+            final comboValueStr = comboVal.value;
+            final idx = comboValueStr.indexOf('-');
+            if (idx <= 0) continue;
+            final attrPart = comboValueStr.substring(0, idx).trim();
+            final attrSlug = ProductDetails.attributeNameToComboSlug(attrPart);
+            if (attrSlug.isEmpty) continue;
+            comboBasedSelection[attrSlug] = comboVal.id;
+          }
+          // Merge: combo-based selection takes precedence (source of truth), then add any other selected
+          final mergedSelection = <String, int>{...comboBasedSelection, ...fullSelection};
+          final selectedIds = mergedSelection.values.toSet();
+          debugPrint(
+            '📋 [Selected IDs] Current selection (all attributes): $selectedIds',
+          );
+          // Show detailed breakdown of each selected attribute
+          debugPrint(
+            '   📋 [Selection Details]',
+          );
+          debugPrint(
+            '   📋 [From Combo] Combo-based selection: $comboBasedSelection',
+          );
+          debugPrint(
+            '   📋 [From Options] variantAttributeOptions selection: $fullSelection',
+          );
+          debugPrint(
+            '   📋 [Merged] Final merged selection: $mergedSelection',
+          );
+          for (final entry in mergedSelection.entries) {
+            final source = comboBasedSelection.containsKey(entry.key) ? 'combo' : 'options';
+            debugPrint(
+              '      - Attribute: ${entry.key} | Selected ID: ${entry.value} (from $source)',
+            );
+          }
+
+          // Step 5: Validate: compare selected ids (with normalized attribute ids) with available combination ids.
+          // Exclude the clicked attribute from validation (we're validating OTHER attributes match)
+          // Get clicked attribute slug
+          final clickedAttrSlug = tappedAttrSlug; // Already computed earlier in the function
+          // Remove clicked attribute from mergedSelection for validation
+          final selectedForValidation = Map<String, int>.from(mergedSelection);
+          selectedForValidation.remove(clickedAttrSlug);
+          final selectedIdsForValidation = selectedForValidation.values.toSet();
+          // Remove clicked attribute ID from available combination IDs
+          final clickedAttributeIdInCombo = comboBasedSelection[clickedAttrSlug];
+          final availableIdsForValidation = clickedAttributeIdInCombo != null
+              ? availableCombinationIds.where((id) => id != clickedAttributeIdInCombo).toSet()
+              : availableCombinationIds;
+          
+          final idsMatch = selectedIdsForValidation.length == availableIdsForValidation.length &&
+              selectedIdsForValidation.containsAll(availableIdsForValidation);
+          debugPrint(
+            '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+          );
+          debugPrint(
+            '✅ [Validate] Comparing (excluding clicked attribute "$clickedAttrSlug", ID: $clickedAttributeIdInCombo):',
+          );
+          debugPrint(
+            '   Selected IDs (all):     $selectedIds',
+          );
+          debugPrint(
+            '   Selected IDs (for validation, excluding clicked):     $selectedIdsForValidation',
+          );
+          debugPrint(
+            '   Available IDs (all):    $availableCombinationIds',
+          );
+          debugPrint(
+            '   Available IDs (for validation, excluding clicked):    $availableIdsForValidation',
+          );
+          debugPrint(
+            '   Match Result:     ${idsMatch ? "✅ MATCH" : "❌ NO MATCH"}',
+          );
+          debugPrint(
+            '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+          );
+
+          if (idsMatch) {
+            // Exact match → use combo for stock badge (in stock, low stock, etc.)
+            matchedAttrCombo = comboFromLoop;
+            final qty = comboFromLoop.quantityAvailable;
+            final hasStock = comboFromLoop.inStock && qty > 0;
+            newInStock = hasStock;
+            debugPrint(
+              '📦 [AttrCombos] ✅ Match! variantId=${comboFromLoop.variantId}, '
+              'qty=$qty, inStock=${comboFromLoop.inStock} → newInStock=$newInStock',
+            );
+          } else {
+            // No match → out of stock
+            matchedAttrCombo = null;
+            newInStock = false;
+            debugPrint(
+              '📦 [AttrCombos] ❌ No match: selectedIdsForValidation=$selectedIdsForValidation ≠ availableIdsForValidation=$availableIdsForValidation → out of stock',
+            );
+          }
+        } else {
+          // Fallback to variant_combinations when no matching attribute combo is found.
+          if (matching.isEmpty) {
+            newInStock = false;
+            debugPrint(
+              '📦 No matching variants for current selection (size="$newSelectedSize", color="$newSelectedColor"). '
+              'Marking inStock = false for this combination.',
+            );
+          } else {
+            // Don't set inStock from variant matches - only set from combination validation
+            // Keep newInStock as false until combination matches exactly
+            newInStock = false; // Don't show in stock until combination matches
+            debugPrint(
+              '📦 Found ${matching.length} matching variants for current selection '
+              '(size="$newSelectedSize", color="$newSelectedColor"), '
+              'but inStock=false until combination matches exactly',
+            );
+          }
+        }
+      } catch (e) {
+        debugPrint(
+          '⚠️ [AttrCombos] Error resolving selection from attribute combinations: $e',
+        );
+        // On error, fall back to previous variant_combinations based logic.
+        if (matching.isEmpty) {
+          newInStock = false;
+          debugPrint(
+            '📦 No matching variants for current selection (size="$newSelectedSize", color="$newSelectedColor"). '
+            'Marking inStock = false for this combination.',
+          );
+        } else {
+          // Don't set inStock from variant matches - only set from combination validation
+          // Keep newInStock as false until combination matches exactly
+          newInStock = false; // Don't show in stock until combination matches
+          debugPrint(
+            '⚠️ [AttrCombos] Error: Found ${matching.length} matching variants, '
+            'but inStock=false until combination matches exactly',
+          );
+        }
+      }
     } else {
-      // At least one matching variant exists; consider it in stock only if any matching
-      // variant is actually available according to _isVariantInStock (inStock flag + qty).
-      final hasAvailable = matching.any(_isVariantInStock);
-      newInStock = hasAvailable;
-      debugPrint(
-        '📦 Found ${matching.length} matching variants for current selection '
-        '(size="$newSelectedSize", color="$newSelectedColor"), '
-        'availableMatches=$hasAvailable → inStock=$newInStock',
-      );
+      // No normalized attribute combinations present → keep existing logic.
+      if (matching.isEmpty) {
+        newInStock = false;
+        debugPrint(
+          '📦 No matching variants for current selection (size="$newSelectedSize", color="$newSelectedColor"). '
+          'Marking inStock = false for this combination.',
+        );
+      } else {
+        final hasAvailable = matching.any(_isVariantInStock);
+        newInStock = hasAvailable;
+        debugPrint(
+          '📦 Found ${matching.length} matching variants for current selection '
+          '(size="$newSelectedSize", color="$newSelectedColor"), '
+          'availableMatches=$hasAvailable → inStock=$newInStock',
+        );
+      }
     }
     
     // Step 6: If size was changed, update color availability
     
     List<ColorOption> updatedColorOptions = currentProduct.colorOptions;
-    final isSizeAttribute = event.attributeName.toLowerCase() == 'size' ||
-                           event.attributeName.toLowerCase() == currentProduct.primaryVariantLabel.toLowerCase() ||
-                           event.attributeName.toLowerCase().contains('size');
+    final isSizeAttribute = tappedOption.attributeName.toLowerCase() == 'size' ||
+                           tappedOption.attributeName.toLowerCase() == currentProduct.primaryVariantLabel.toLowerCase() ||
+                           tappedOption.attributeName.toLowerCase().contains('size');
     
     if (isSizeAttribute && newSelectedSize.isNotEmpty) {
       debugPrint('🔍 ========== UPDATING COLOR AVAILABILITY FOR SIZE ==========');
@@ -1472,12 +1413,12 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         }
       }
       
-      // If not found, try to extract from the event value directly
+      // If not found, use the tapped value name when this event was for size
       if (selectedSizeEnglishName == null || selectedSizeEnglishName.isEmpty) {
-        // The event.attributeValue should be the size name
-        if (event.attributeValue.isNotEmpty && !_containsArabic(event.attributeValue)) {
-          selectedSizeEnglishName = event.attributeValue;
-          debugPrint('📏 Using event.attributeValue as size: "$selectedSizeEnglishName"');
+        if (tappedOption.attributeName.toLowerCase().contains('size') &&
+            tappedValue.name.isNotEmpty && !_containsArabic(tappedValue.name)) {
+          selectedSizeEnglishName = tappedValue.name;
+          debugPrint('📏 Using tapped value name as size: "$selectedSizeEnglishName"');
         } else {
           selectedSizeEnglishName = newSelectedSize;
           debugPrint('📏 Fallback: Using newSelectedSize: "$selectedSizeEnglishName"');
@@ -1704,40 +1645,8 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         }
         
         if (!currentColorIsAvailable) {
-          debugPrint('⚠️ Current color "$newSelectedColor" is not available for size "$selectedSizeForMatching", finding first available color...');
-          final firstAvailable = updatedColorOptions.firstWhere(
-            (c) => c.isAvailable,
-            orElse: () => updatedColorOptions.first,
-          );
-          if (firstAvailable.isAvailable) {
-            // Get the English name for the first available color
-            String? firstAvailableColorName = firstAvailable.name;
-            if (firstAvailableColorName.startsWith('COLOR_ID_')) {
-              // Try to get from variantAttributeOptions
-              for (final opt in recomputedOptions) {
-                final attrNameLower = opt.attributeName.toLowerCase();
-                if (attrNameLower == 'color name' || attrNameLower == 'color' || attrNameLower == 'colour' || attrNameLower == 'اللون') {
-                  try {
-                    final matchedValue = opt.values.firstWhere((v) => v.id == firstAvailable.id);
-                    firstAvailableColorName = matchedValue.name;
-                    break;
-                  } catch (e) {
-                    // ID not found, continue
-                  }
-                }
-              }
-            }
-            if (firstAvailableColorName != null && firstAvailableColorName.isNotEmpty) {
-              newSelectedColor = firstAvailableColorName;
-              debugPrint('✅ Switched to first available color: "$newSelectedColor"');
-            } else {
-              newSelectedColor = '';
-              debugPrint('⚠️ Could not determine color name for first available color');
-            }
-          } else {
-            newSelectedColor = ''; // No available colors
-            debugPrint('⚠️ No available colors found for size "$selectedSizeForMatching"');
-          }
+          debugPrint('⚠️ Current color "$newSelectedColor" is not available for size "$selectedSizeForMatching", but keeping selected color (no auto-switch)');
+          // Keep the selected color even if not available - don't auto-switch to first available
         }
       }
     }
@@ -1783,69 +1692,153 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
       inStock: newInStock,
     );
     
-    // Step 7: sync quantity & stock with the matched variant (if any)
+    // Step 7: sync quantity & stock with the matched variant (if any).
+    // Prefer matchedAttrCombo from attribute_value_combinations when available so
+    // every attribute click drives quantity from the same filter source.
     int nextQuantity = blocState.quantity;
     final VariantCombination? selectedVariant = _findSelectedVariant(updatedProduct);
-      if (selectedVariant != null) {
-        final double? quantityAvailable = selectedVariant.quantityAvailable;
-        bool variantInStock = selectedVariant.inStock;
-        
-        if (quantityAvailable != null) {
-          // Check if there's already an item in cart with this variant ID
-          int existingCartQuantity = 0;
-          final variantIdToCheck = selectedVariant.variantId;
-          if (cartBloc.state is CartLoaded) {
-            final cartState = cartBloc.state as CartLoaded;
-            try {
-              final existingItem = cartState.cartItems.firstWhere(
-                (item) => item.product.id == variantIdToCheck,
-              );
-              existingCartQuantity = existingItem.quantity;
-            } catch (e) {
-              // Item not found in cart, existingCartQuantity remains 0
-            }
+
+    // When Step 5 has already determined that the current combination has NO
+    // in-stock variants (newInStock == false), we must respect that decision
+    // and force the UI to show this combination as out of stock, even if a
+    // fallback variant is found by _findSelectedVariant (which may ignore
+    // non-primary attributes such as WIDTH/MEASUREMENT).
+    if (!newInStock) {
+      nextQuantity = 1;
+      updatedProduct = updatedProduct.copyWith(
+        inStock: false,
+        // Explicitly treat this combination as having zero available quantity
+        // so badges/buttons behave correctly.
+        selectedVariantQuantityAvailable: 0,
+      );
+    } else if (matchedAttrCombo != null) {
+      // Use normalized attribute combination as single source of truth for stock,
+      // and also sync images to this concrete variant (same behavior as color flow).
+      final double? quantityAvailable = matchedAttrCombo.quantityAvailable;
+      bool variantInStock = matchedAttrCombo.inStock;
+
+      // Update images to match this exact variant so the whole page clearly
+      // reflects the newly selected combination without requiring a color change.
+      final String variantIdForImages = matchedAttrCombo.variantId.toString();
+      updatedProduct = updatedProduct.withImagesForVariant(variantIdForImages);
+
+      if (quantityAvailable != null) {
+        // Check if there's already an item in cart with this variant ID
+        int existingCartQuantity = 0;
+        final variantIdToCheck = matchedAttrCombo.variantId;
+        if (cartBloc.state is CartLoaded) {
+          final cartState = cartBloc.state as CartLoaded;
+          try {
+            final existingItem = cartState.cartItems.firstWhere(
+              (item) => item.product.id.toString() == variantIdToCheck.toString(),
+            );
+            existingCartQuantity = existingItem.quantity;
+          } catch (e) {
+            // Item not found in cart, existingCartQuantity remains 0
           }
-          
-          final maxAllowed = quantityAvailable.toInt();
-          final available = maxAllowed - existingCartQuantity;
-          
-          if (maxAllowed <= 0 || available <= 0) {
-            // No stock for this combination
-            variantInStock = false;
-            nextQuantity = 1;
-          } else {
-            // Clamp to available quantity (accounting for cart items)
-            if (nextQuantity > available) {
-              nextQuantity = available;
-            }
-            if (nextQuantity <= 0) {
-              nextQuantity = 1;
-            }
-          }
-          
-          debugPrint('🔍 Filter variant: variantId=${selectedVariant.variantId}, totalAvailable=$maxAllowed, inCart=$existingCartQuantity, available=$available, adjustedQty=$nextQuantity');
         }
-        
-        updatedProduct = updatedProduct.copyWith(
-          inStock: variantInStock,
-          selectedVariantQuantityAvailable:
-              selectedVariant.quantityAvailable?.toInt(),
-        );
-        // Images update only on color change; do not change images in FilterVariantsByAttribute.
-      } else {
-        // No exact variant for current color + all selected attributes:
-        // treat this combination as out of stock for badge / Add to Cart.
-        updatedProduct = updatedProduct.copyWith(
-          inStock: false,
-          selectedVariantQuantityAvailable: null,
+
+        final maxAllowed = quantityAvailable.toInt();
+        final available = maxAllowed - existingCartQuantity;
+
+        if (maxAllowed <= 0 || available <= 0) {
+          // No stock for this combination
+          variantInStock = false;
+          nextQuantity = 1;
+        } else {
+          // Clamp to available quantity (accounting for cart items)
+          if (nextQuantity > available) {
+            nextQuantity = available;
+          }
+          if (nextQuantity <= 0) {
+            nextQuantity = 1;
+          }
+        }
+
+        debugPrint(
+          '🔍 [AttrCombos] Filter variant: variantId=${matchedAttrCombo.variantId}, '
+          'totalAvailable=$maxAllowed, inCart=$existingCartQuantity, available=$available, '
+          'adjustedQty=$nextQuantity',
         );
       }
 
-    emit(ProductDetailsLoaded(
-      updatedProduct,
-      quantity: nextQuantity,
-      isAdding: false,
-    ));
+      updatedProduct = updatedProduct.copyWith(
+        inStock: variantInStock,
+        selectedVariantQuantityAvailable:
+            variantInStock ? matchedAttrCombo.quantityAvailable.toInt() : 0,
+      );
+      // Images update only on color change; do not change images in FilterVariantsByAttribute.
+    } else if (selectedVariant != null) {
+      final double? quantityAvailable = selectedVariant.quantityAvailable;
+      bool variantInStock = selectedVariant.inStock;
+      
+      if (quantityAvailable != null) {
+        // Check if there's already an item in cart with this variant ID
+        int existingCartQuantity = 0;
+        final variantIdToCheck = selectedVariant.variantId;
+        if (cartBloc.state is CartLoaded) {
+          final cartState = cartBloc.state as CartLoaded;
+          try {
+            final existingItem = cartState.cartItems.firstWhere(
+              (item) => item.product.id == variantIdToCheck,
+            );
+            existingCartQuantity = existingItem.quantity;
+          } catch (e) {
+            // Item not found in cart, existingCartQuantity remains 0
+          }
+        }
+        
+        final maxAllowed = quantityAvailable.toInt();
+        final available = maxAllowed - existingCartQuantity;
+        
+        if (maxAllowed <= 0 || available <= 0) {
+          // No stock for this combination
+          variantInStock = false;
+          nextQuantity = 1;
+        } else {
+          // Clamp to available quantity (accounting for cart items)
+          if (nextQuantity > available) {
+            nextQuantity = available;
+          }
+          if (nextQuantity <= 0) {
+            nextQuantity = 1;
+          }
+        }
+        
+        debugPrint('🔍 Filter variant: variantId=${selectedVariant.variantId}, totalAvailable=$maxAllowed, inCart=$existingCartQuantity, available=$available, adjustedQty=$nextQuantity');
+      }
+      
+      updatedProduct = updatedProduct.copyWith(
+        inStock: variantInStock,
+        selectedVariantQuantityAvailable: variantInStock
+            ? selectedVariant.quantityAvailable?.toInt()
+            : 0,
+      );
+      // Images update only on color change; do not change images in FilterVariantsByAttribute.
+    } else {
+      // No specific variant matched but newInStock is true (rare fallback case).
+      // Keep inStock as computed in Step 5 and clear badge quantity.
+      updatedProduct = updatedProduct.copyWith(
+        inStock: newInStock,
+        selectedVariantQuantityAvailable: null,
+      );
+    }
+
+    // Debug: log final stock/quantity before emitting so we can verify UI sync
+    debugPrint(
+      '📦 [Filter][Emit] prev.inStock=${currentProduct.inStock}, '
+      'prev.qty=${currentProduct.selectedVariantQuantityAvailable} → '
+      'new.inStock=${updatedProduct.inStock}, '
+      'new.qty=${updatedProduct.selectedVariantQuantityAvailable}, '
+      'nextQuantity=$nextQuantity',
+    );
+    debugPrint('🔴 [FilterVariantsByAttribute] EMITTING state: selectedSize="${updatedProduct.selectedSize}" selectedColor="${updatedProduct.selectedColor}"');
+    for (final opt in updatedProduct.variantAttributeOptions) {
+      debugPrint('🔴 [FilterVariantsByAttribute]   attr="${opt.attributeName}" selectedValue="${opt.selectedValue}"');
+    }
+    debugPrint('🔴 [FilterVariantsByAttribute] ═══════════════════════════════════════');
+
+    emit(ProductDetailsLoaded(updatedProduct, quantity: nextQuantity, isAdding: false));
   }
 
   Future<void> _onLoadProductDetails(
@@ -1865,6 +1858,8 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
     result.fold(
       (failure) => emit(ProductDetailsError(failure.message)),
       (productDetails) {
+        debugPrint('🔴 [_onLoadProductDetails] ═══════════════════════════════════════');
+        debugPrint('🔴 [_onLoadProductDetails] PRODUCT LOADED - setting initial selection (NO USER TAP)');
         debugPrint('🔢 Setting initial quantity to 1 for product: ${productDetails.name}');
         
         // Helper to get color value from variant trying multiple attribute names
@@ -1959,10 +1954,11 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         double? initialSelectedHeelHeight = productDetails.selectedHeelHeightCm;
 
         debugPrint(
-          '📌 Initial stored selection (first value of each attribute): '
+          '🔴 [_onLoadProductDetails] Initial stored selection (first value of each attribute): '
           'color="$initialSelectedColor", size="${initialSelectedSize ?? ''}", '
           'material="${initialSelectedMaterial ?? ''}", height=${initialSelectedHeelHeight?.toStringAsFixed(1) ?? "null"}',
         );
+        debugPrint('🔴 [_onLoadProductDetails] ═══════════════════════════════════════');
         
         // Align variantAttributeOptions (SIZE attribute) with the initial selected size
         final List<VariantAttributeOption> updatedVariantAttributeOptions =
@@ -1989,6 +1985,7 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
               return VariantAttributeValue(
                 id: v.id,
                 name: v.name,
+                displayName: v.displayName,
                 isAvailable: v.isAvailable,
                 isSelected: isSelected,
               );
@@ -2014,6 +2011,7 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
               return VariantAttributeValue(
                 id: v.id,
                 name: v.name,
+                displayName: v.displayName,
                 isAvailable: v.isAvailable,
                 isSelected: isSelected,
               );
@@ -2034,6 +2032,7 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
             final singleSelected = VariantAttributeValue(
               id: v.id,
               name: v.name,
+              displayName: v.displayName,
               isAvailable: true,
               isSelected: true,
             );
@@ -2224,59 +2223,44 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
           'material:"${updatedProduct.selectedMaterial}", heelHeight:${updatedProduct.selectedHeelHeightCm?.toStringAsFixed(1) ?? "null"}',
         );
         int initialQuantity = 1;
-
-        // Prefer new attribute_value_combinations-based flow when available.
-        if (updatedProduct.attributeVariantCombinations.isNotEmpty) {
-          final result = _applyAttributeCombinationsFlow(
-            updatedProduct,
-            _getSelectedAttributeValueIds(updatedProduct),
-            initialQuantity,
-            updateImages: true,
-            preserveStockWhenNoMatch: false, // Show correct stock for selected combo
-            allAttributesEnabledOnInitial: true,
-          );
-          updatedProduct = result.product;
-          initialQuantity = result.quantity;
-        } else {
-          // Fallback to legacy variant_combinations-based flow when normalized data is absent.
-          final VariantCombination? selectedVariant = _findSelectedVariant(updatedProduct);
-          if (selectedVariant != null) {
-            final double? quantityAvailable = selectedVariant.quantityAvailable;
-            bool variantInStock = selectedVariant.inStock;
-            
-            debugPrint('📦 Initial variant: variantId=${selectedVariant.variantId}, inStock=$variantInStock, quantityAvailable=$quantityAvailable');
-            
-            // Check stock: if quantity is known, require > 0. If unknown (null), rely on inStock flag.
-            final qty = quantityAvailable;
-            if (qty != null) {
-              variantInStock = variantInStock && qty > 0;
-            }
-            
-            if (qty != null && qty > 0) {
-              final int maxAllowed = qty.toInt();
-              // Ensure initial quantity doesn't exceed available stock
-              initialQuantity = initialQuantity > maxAllowed ? maxAllowed : initialQuantity;
-              if (initialQuantity <= 0) {
-                initialQuantity = 1;
-              }
-            } else {
+        
+        final VariantCombination? selectedVariant = _findSelectedVariant(updatedProduct);
+        if (selectedVariant != null) {
+          final double? quantityAvailable = selectedVariant.quantityAvailable;
+          bool variantInStock = selectedVariant.inStock;
+          
+          debugPrint('📦 Initial variant: variantId=${selectedVariant.variantId}, inStock=$variantInStock, quantityAvailable=$quantityAvailable');
+          
+          // Check stock: if quantity is known, require > 0. If unknown (null), rely on inStock flag.
+          final qty = quantityAvailable;
+          if (qty != null) {
+            variantInStock = variantInStock && qty > 0;
+          }
+          
+          if (qty != null && qty > 0) {
+            final int maxAllowed = qty.toInt();
+            // Ensure initial quantity doesn't exceed available stock
+            initialQuantity = initialQuantity > maxAllowed ? maxAllowed : initialQuantity;
+            if (initialQuantity <= 0) {
               initialQuantity = 1;
             }
-            
-            updatedProduct = updatedProduct.copyWith(
-              inStock: variantInStock,
-              selectedVariantQuantityAvailable: selectedVariant.quantityAvailable?.toInt(),
-            );
-            // Set initial images by color only (variant_id from first variant matching selected color)
-            if (updatedProduct.variantImagesMap.isNotEmpty) {
-              final vid = updatedProduct.variantIdForImagesByColor;
-              if (vid != null && vid.isNotEmpty) {
-                updatedProduct = updatedProduct.withImagesForVariant(vid);
-              }
+          } else {
+            initialQuantity = 1;
+          }
+          
+          updatedProduct = updatedProduct.copyWith(
+            inStock: variantInStock,
+            selectedVariantQuantityAvailable: selectedVariant.quantityAvailable?.toInt(),
+          );
+          // Set initial images by color only (variant_id from first variant matching selected color)
+          if (updatedProduct.variantImagesMap.isNotEmpty) {
+            final vid = updatedProduct.variantIdForImagesByColor;
+            if (vid != null && vid.isNotEmpty) {
+              updatedProduct = updatedProduct.withImagesForVariant(vid);
             }
           }
         }
-
+        
         emit(ProductDetailsLoaded(updatedProduct, quantity: initialQuantity, isAdding: false));
       },
     );
@@ -2347,9 +2331,15 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
     SelectColorEvent event,
     Emitter<ProductDetailsState> emit,
   ) async {
+    debugPrint('🔴 [_onSelectColor] ═══════════════════════════════════════');
+    debugPrint('🔴 [_onSelectColor] EVENT RECEIVED (USER TAPPED COLOR BUTTON) colorId=${event.colorId}');
     if (state is ProductDetailsLoaded) {
       final currentState = state as ProductDetailsLoaded;
       final currentProduct = currentState.productDetails;
+      debugPrint('🔴 [_onSelectColor] BEFORE: selectedSize="${currentProduct.selectedSize}" selectedColor="${currentProduct.selectedColor}"');
+      for (final opt in currentProduct.variantAttributeOptions) {
+        debugPrint('🔴 [_onSelectColor]   attr="${opt.attributeName}" selectedValue="${opt.selectedValue}"');
+      }
       
       // Find the selected color option from colorOptions (for display purposes)
       final selectedColorOption = currentProduct.colorOptions.firstWhere(
@@ -2424,80 +2414,6 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
               debugPrint('✅ Using variantAttributeOptions (secondary): "$actualColorName" for color ID ${event.colorId}');
             }
           } catch (_) {}
-        }
-      }
-
-      // When attribute_value_combinations is present: send ONLY clicked color name.
-      if (currentProduct.attributeValueCombinationsByKey.isNotEmpty) {
-        final colorName = actualColorName ?? selectedColorOption.name;
-        if (colorName != null && colorName.isNotEmpty) {
-          debugPrint(
-            '📦 [attribute_value_combinations] SelectColor: sending ONLY clicked value name: "$colorName"',
-          );
-          final selection = currentProduct.resolveSelectionByClickedValue(colorName);
-          final updatedColorOptions = currentProduct.colorOptions.map((c) {
-            return ColorOption(
-              id: c.id,
-              name: c.name,
-              displayName: c.displayName,
-              code: c.code,
-              images: c.images,
-              isSelected: c.id.toString().trim() == event.colorId.toString().trim(),
-            );
-          }).toList();
-          final updatedColorOpts = currentProduct.variantAttributeOptions.map((opt) {
-            final attrLower = opt.attributeName.toLowerCase();
-            if (attrLower != 'color name' && attrLower != 'color' && attrLower != 'colour' && attrLower != 'اللون') {
-              return opt;
-            }
-            final newValues = opt.values.map((v) {
-              return VariantAttributeValue(
-                id: v.id,
-                name: v.name,
-                isAvailable: v.isAvailable,
-                isSelected: v.id.toString().trim() == event.colorId.toString().trim(),
-              );
-            }).toList();
-            final matching = opt.values
-                .where((v) => v.id.toString().trim() == event.colorId.toString().trim())
-                .map((v) => v.name)
-                .toList();
-            final selectedVal = matching.isNotEmpty ? matching.first : colorName;
-            return VariantAttributeOption(
-              attributeName: opt.attributeName,
-              values: newValues,
-              selectedValue: selectedVal,
-              apiAttributeName: opt.apiAttributeName,
-              attributeId: opt.attributeId,
-            );
-          }).toList();
-          var updatedPd = currentProduct.copyWith(
-            colorOptions: updatedColorOptions,
-            selectedColor: colorName,
-            variantAttributeOptions: updatedColorOpts,
-          );
-          final colorAttrName = currentProduct.variantAttributeOptions
-              .where((o) {
-                final a = _norm(o.attributeName);
-                return a == 'color' || a == 'colour' || a == 'color name' || a == 'اللون';
-              })
-              .map((o) => o.attributeName)
-              .firstOrNull;
-          final result = _applyAttributeCombinationsFlowFromResult(
-            updatedPd,
-            selection,
-            currentState.quantity,
-            updateImages: true,
-            skipSuggestedSelectionForAttribute: colorAttrName,
-          );
-          final finalProduct = _syncSelectedFieldsFromVariantOptions(result.product);
-          emit(ProductDetailsLoaded(finalProduct, quantity: result.quantity, isAdding: false));
-          final res = await selectColor(SelectColorParams(productId: event.productId, colorId: event.colorId));
-          res.fold(
-            (failure) => emit(ProductDetailsError(failure.message)),
-            (_) {},
-          );
-          return;
         }
       }
 
@@ -2896,6 +2812,22 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         }
       }
       
+      // Find the clicked color option and value for dynamic attribute checking
+      VariantAttributeOption? clickedColorOption;
+      VariantAttributeValue? clickedColorValue;
+      for (final opt in currentProduct.variantAttributeOptions) {
+        final attrNameLower = opt.attributeName.toLowerCase();
+        if (attrNameLower == 'color name' || attrNameLower == 'color' || attrNameLower == 'colour' || attrNameLower == 'اللون') {
+          try {
+            clickedColorValue = opt.values.firstWhere(
+              (v) => v.id.toString().trim() == event.colorId.toString().trim(),
+            );
+            clickedColorOption = opt;
+            break;
+          } catch (_) {}
+        }
+      }
+      
       // Recompute availability for ALL variant attribute options
       // CRITICAL: Only require matching on attributes that actually vary (color, size)
       // Don't require matching on attributes that are the same for all variants (material, height, brand)
@@ -3077,6 +3009,7 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
           return VariantAttributeValue(
             id: value.id,
             name: value.name,
+            displayName: value.displayName,
             isAvailable: isAvailable,
             isSelected: isSelected,
           );
@@ -3096,6 +3029,7 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
             newValues[0] = VariantAttributeValue(
               id: singleValue.id,
               name: singleValue.name,
+              displayName: singleValue.displayName,
               isAvailable: true, // Force available for single option
               isSelected: true, // Auto-select single option
             );
@@ -3106,73 +3040,81 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         // Determine the selected value for this option
         String optionSelectedValue = '';
         
-        // If Material/Height/Brand has only one option and it's auto-selected, use that value
-        if (isMaterialHeightOrBrand && newValues.length == 1) {
-          optionSelectedValue = newValues.first.name;
-        } else if (attrNameLower == 'size' || 
-            attrNameLower == currentProduct.primaryVariantLabel.toLowerCase() ||
-            attrNameLower == 'brand') {
-          // CRITICAL: Always preserve the current selected size, even if not available for new color
-          // Check if current size exists in newValues (available or not)
-          final currentSizeExists = newValues.any((v) => 
-            normalize(v.name) == normalize(currentProduct.selectedSize));
+        // DYNAMIC: Check if this attribute is the clicked attribute (color in this function)
+        final isClickedAttribute = clickedColorOption != null && 
+            normalize(attributeName) == normalize(clickedColorOption!.attributeName);
+        
+        if (!isClickedAttribute) {
+          // NOT the clicked attribute - preserve current selection exactly
+          // Don't update from combo or availability - keep what user selected
+          optionSelectedValue = attrOption.selectedValue; // Preserve current selection
           
-          if (currentSizeExists || currentProduct.selectedSize.isNotEmpty) {
-            // Current size exists OR we have a selected size - preserve it
-            // First, try to find exact match
-            final matchingValue = newValues.firstWhere(
-              (v) => normalize(v.name) == normalize(currentProduct.selectedSize),
-              orElse: () => newValues.isNotEmpty ? newValues.first : VariantAttributeValue(
-                id: '',
-                name: currentProduct.selectedSize,
-                isAvailable: false,
-                isSelected: false,
-              ),
+          // Preserve existing isSelected flags - don't change them
+          newValues = newValues.map((v) {
+            // Keep existing isSelected state
+            final shouldBeSelected = normalize(v.name) == normalize(optionSelectedValue) ||
+                (optionSelectedValue.isEmpty && v.isSelected);
+            return VariantAttributeValue(
+              id: v.id,
+              name: v.name,
+              displayName: v.displayName,
+              isAvailable: v.isAvailable,
+              isSelected: shouldBeSelected,
             );
-            
-            optionSelectedValue = matchingValue.name.isNotEmpty 
-                ? matchingValue.name 
-                : currentProduct.selectedSize;
-            
-            // Ensure it's marked as selected in the values list (even if not available)
-            newValues = newValues.map((v) {
-              final isSelected = normalize(v.name) == normalize(optionSelectedValue);
-              return VariantAttributeValue(
-                id: v.id,
-                name: v.name,
-                isAvailable: v.isAvailable,
-                isSelected: isSelected, // Mark as selected even if not available
-              );
-            }).toList();
-            debugPrint('✅ Size preserved in recomputedOptions: "$optionSelectedValue" (from currentProduct.selectedSize: "${currentProduct.selectedSize}")');
-          } else if (newValues.isNotEmpty) {
-            // Current size doesn't exist - use first available or first item
-            final firstAvailable = newValues.firstWhere(
-              (v) => v.isAvailable,
-              orElse: () => newValues.first,
-            );
-            optionSelectedValue = firstAvailable.name;
-          }
-        } else if (attrNameLower == 'color name' || 
-                   attrNameLower == 'color' || 
-                   attrNameLower == 'colour' ||
-                   attrNameLower == 'اللون') {
-          optionSelectedValue = colorNameForMatching;
-        } else if (attrNameLower == 'material' || attrNameLower == 'material name') {
-          optionSelectedValue = currentProduct.selectedMaterial ?? '';
-        } else if (attrNameLower == 'height') {
-          if (currentProduct.selectedHeelHeightCm != null) {
-            final currH = currentProduct.selectedHeelHeightCm!;
-            final matching = newValues.where((v) {
-              final vNum = double.tryParse(v.name.replaceAll(RegExp(r'[^0-9.]'), ''));
-              return vNum != null && (vNum - currH).abs() < 0.01;
-            });
-            optionSelectedValue = matching.isNotEmpty ? matching.first.name : currH.toStringAsFixed(1);
-          } else {
-            optionSelectedValue = '';
-          }
+          }).toList();
+          debugPrint('🔒 Attribute "${attrOption.attributeName}" preserved (not clicked): "$optionSelectedValue"');
         } else {
-          optionSelectedValue = selectedByAttribute[attributeName] ?? '';
+          // THIS IS the clicked attribute - update it normally
+          // Handle special cases for different attribute types
+          if (isMaterialHeightOrBrand && newValues.length == 1) {
+            optionSelectedValue = newValues.first.name;
+          } else if (attrNameLower == 'size' || 
+              attrNameLower == currentProduct.primaryVariantLabel.toLowerCase() ||
+              attrNameLower == 'brand') {
+            // Size is being clicked - update it
+            final currentSizeExists = newValues.any((v) => 
+              normalize(v.name) == normalize(currentProduct.selectedSize));
+            
+            if (currentSizeExists || currentProduct.selectedSize.isNotEmpty) {
+              final matchingValue = newValues.firstWhere(
+                (v) => normalize(v.name) == normalize(currentProduct.selectedSize),
+                orElse: () => newValues.isNotEmpty ? newValues.first : VariantAttributeValue(
+                  id: '',
+                  name: currentProduct.selectedSize,
+                  displayName: null,
+                  isAvailable: false,
+                  isSelected: false,
+                ),
+              );
+              optionSelectedValue = matchingValue.name.isNotEmpty 
+                  ? matchingValue.name 
+                  : currentProduct.selectedSize;
+              newValues = newValues.map((v) {
+                final isSelected = normalize(v.name) == normalize(optionSelectedValue);
+                return VariantAttributeValue(
+                  id: v.id,
+                  name: v.name,
+                  displayName: v.displayName,
+                  isAvailable: v.isAvailable,
+                  isSelected: isSelected,
+                );
+              }).toList();
+              debugPrint('✅ Size updated (clicked): "$optionSelectedValue"');
+            } else {
+              optionSelectedValue = currentProduct.selectedSize;
+            }
+          } else if (attrNameLower == 'color name' || 
+                     attrNameLower == 'color' || 
+                     attrNameLower == 'colour' ||
+                     attrNameLower == 'اللون') {
+            // Color is being clicked - use the clicked color name
+            optionSelectedValue = clickedColorValue?.name ?? colorNameForMatching;
+          } else {
+            // Other attributes (material, height, width, etc.) - preserve current selection
+            // In _onSelectColor, only color is clicked, so other attributes should stay unchanged
+            optionSelectedValue = attrOption.selectedValue;
+          }
+          debugPrint('✅ Attribute "${attrOption.attributeName}" updated (clicked): "$optionSelectedValue"');
         }
 
         recomputedOptions.add(VariantAttributeOption(
@@ -3194,46 +3136,30 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         final opt = recomputedOptions[i];
         final attrNameLower = opt.attributeName.toLowerCase();
         
+        // DYNAMIC: Check if this attribute is the clicked attribute (color in this function)
+        final isClickedAttribute = clickedColorOption != null && 
+            normalize(opt.attributeName) == normalize(clickedColorOption!.attributeName);
+        
+        if (!isClickedAttribute) {
+          // NOT the clicked attribute - skip updating it, preserve as is
+          debugPrint('🔒 Attribute "${opt.attributeName}" preserved in second loop (not clicked): "${opt.selectedValue}"');
+          continue; // Skip to next attribute - don't modify this one
+        }
+        
+        // THIS IS the clicked attribute - update it normally
         // Handle size/primary variant
         if (attrNameLower == 'size' || 
             attrNameLower == currentProduct.primaryVariantLabel.toLowerCase() ||
             attrNameLower == 'brand') {
-          // CRITICAL: Always preserve the current selected size, even if not available for new color
-          // The size should already be preserved in opt.selectedValue when building recomputedOptions
-          // But we need to ensure it's marked as selected in the values list
-          
-          // Use the selectedValue from the option (already set correctly when building recomputedOptions)
+          // Size IS being clicked - update it normally
           if (opt.selectedValue.isNotEmpty && 
               normalize(opt.selectedValue) == normalize(nextSelectedPrimary)) {
-            // Size is already preserved in selectedValue - ensure it's marked as selected in values
             final updatedValues = opt.values.map((v) {
               final isSelected = normalize(v.name) == normalize(opt.selectedValue);
               return VariantAttributeValue(
                 id: v.id,
                 name: v.name,
-                isAvailable: v.isAvailable,
-                isSelected: isSelected, // Mark as selected even if not available
-              );
-            }).toList();
-            
-              recomputedOptions[i] = VariantAttributeOption(
-                attributeName: opt.attributeName,
-                values: updatedValues,
-                selectedValue: opt.selectedValue, // Keep the preserved size
-                apiAttributeName: opt.apiAttributeName,
-                attributeId: opt.attributeId,
-              );
-            nextSelectedPrimary = opt.selectedValue; // Update to match
-            debugPrint('✅ Size preserved: "$nextSelectedPrimary" (from opt.selectedValue)');
-          } else if (opt.selectedValue.isNotEmpty) {
-            // Use the preserved selectedValue from the option
-            nextSelectedPrimary = opt.selectedValue;
-            // Ensure it's marked as selected in values
-            final updatedValues = opt.values.map((v) {
-              final isSelected = normalize(v.name) == normalize(opt.selectedValue);
-              return VariantAttributeValue(
-                id: v.id,
-                name: v.name,
+                displayName: v.displayName,
                 isAvailable: v.isAvailable,
                 isSelected: isSelected,
               );
@@ -3246,39 +3172,64 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
               apiAttributeName: opt.apiAttributeName,
               attributeId: opt.attributeId,
             );
-            debugPrint('✅ Size preserved: "$nextSelectedPrimary" (using opt.selectedValue)');
-          } else if (opt.values.isNotEmpty) {
-            // Fallback: current size doesn't exist in the list at all - find first available
-            final firstAvailable = opt.values.firstWhere(
-              (v) => v.isAvailable,
-              orElse: () => opt.values.first,
-            );
-            if (firstAvailable.isAvailable) {
-              nextSelectedPrimary = firstAvailable.name;
-              recomputedOptions[i] = VariantAttributeOption(
-                attributeName: opt.attributeName,
-                values: opt.values,
-                selectedValue: nextSelectedPrimary,
-                apiAttributeName: opt.apiAttributeName,
-                attributeId: opt.attributeId,
+            nextSelectedPrimary = opt.selectedValue;
+            debugPrint('✅ Size updated (clicked): "$nextSelectedPrimary"');
+          } else if (opt.selectedValue.isNotEmpty) {
+            nextSelectedPrimary = opt.selectedValue;
+            final updatedValues = opt.values.map((v) {
+              final isSelected = normalize(v.name) == normalize(opt.selectedValue);
+              return VariantAttributeValue(
+                id: v.id,
+                name: v.name,
+                displayName: v.displayName,
+                isAvailable: v.isAvailable,
+                isSelected: isSelected,
               );
-              debugPrint('⚠️ Size changed from "${currentProduct.selectedSize}" to "$nextSelectedPrimary" (current size not in list)');
-            }
+            }).toList();
+            
+            recomputedOptions[i] = VariantAttributeOption(
+              attributeName: opt.attributeName,
+              values: updatedValues,
+              selectedValue: opt.selectedValue,
+              apiAttributeName: opt.apiAttributeName,
+              attributeId: opt.attributeId,
+            );
+            debugPrint('✅ Size updated (clicked): "$nextSelectedPrimary"');
           }
-        }
-        
-        // Handle material
-        if (attrNameLower == 'material' || attrNameLower == 'material name') {
+        } else if (attrNameLower == 'color name' || 
+                   attrNameLower == 'color' || 
+                   attrNameLower == 'colour' ||
+                   attrNameLower == 'اللون') {
+          // Color is being clicked - update it normally
+          if (opt.selectedValue.isNotEmpty) {
+            final updatedValues = opt.values.map((v) {
+              final isSelected = normalize(v.name) == normalize(opt.selectedValue);
+              return VariantAttributeValue(
+                id: v.id,
+                name: v.name,
+                displayName: v.displayName,
+                isAvailable: v.isAvailable,
+                isSelected: isSelected,
+              );
+            }).toList();
+            
+            recomputedOptions[i] = VariantAttributeOption(
+              attributeName: opt.attributeName,
+              values: updatedValues,
+              selectedValue: opt.selectedValue,
+              apiAttributeName: opt.apiAttributeName,
+              attributeId: opt.attributeId,
+            );
+            debugPrint('✅ Color updated (clicked): "${opt.selectedValue}"');
+          }
+        } else if ((attrNameLower == 'material' || attrNameLower == 'material name') && isClickedAttribute) {
           if (nextSelectedMaterial != null && nextSelectedMaterial.isNotEmpty) {
             final currentMaterial = nextSelectedMaterial;
-            // Check if current selection is still available
             final materialValue = opt.values.firstWhere(
               (v) => normalize(v.name) == normalize(currentMaterial),
               orElse: () => opt.values.first,
             );
             if (materialValue.isAvailable) {
-              // Current selection is still available - keep it
-              // Update selectedValue in the option to match
               if (opt.selectedValue != currentMaterial) {
                 recomputedOptions[i] = VariantAttributeOption(
                   attributeName: opt.attributeName,
@@ -3288,51 +3239,11 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
                   attributeId: opt.attributeId,
                 );
               }
-        } else {
-              // Current selection is not available - find first available
-              final firstAvailable = opt.values.firstWhere(
-                (v) => v.isAvailable,
-                orElse: () => opt.values.first,
-              );
-              if (firstAvailable.isAvailable) {
-                nextSelectedMaterial = firstAvailable.name;
-                // Update selectedValue in the option
-                recomputedOptions[i] = VariantAttributeOption(
-                  attributeName: opt.attributeName,
-                  values: opt.values,
-                  selectedValue: firstAvailable.name,
-                  apiAttributeName: opt.apiAttributeName,
-                  attributeId: opt.attributeId,
-                );
-              } else {
-                nextSelectedMaterial = null;
-              }
-            }
-          } else if (opt.values.isNotEmpty) {
-            // No current selection - use first available
-            final firstAvailable = opt.values.firstWhere(
-              (v) => v.isAvailable,
-              orElse: () => opt.values.first,
-            );
-            if (firstAvailable.isAvailable) {
-              nextSelectedMaterial = firstAvailable.name;
-              recomputedOptions[i] = VariantAttributeOption(
-                attributeName: opt.attributeName,
-                values: opt.values,
-                selectedValue: firstAvailable.name,
-                apiAttributeName: opt.apiAttributeName,
-                attributeId: opt.attributeId,
-              );
             }
           }
-        }
-        
-        // Handle heel height
-        if (attrNameLower == 'height') {
+        } else if (attrNameLower == 'height' && isClickedAttribute) {
           if (nextSelectedHeelHeight != null) {
             final currentHeight = nextSelectedHeelHeight;
-            final heightStr = currentHeight.toStringAsFixed(1);
-            // Check if current selection is still available (use numeric match: "2 CM" == 2.0)
             final heightAttrValue = opt.values.firstWhere(
               (v) {
                 final vNum = double.tryParse(v.name.replaceAll(RegExp(r'[^0-9.]'), ''));
@@ -3341,76 +3252,12 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
               orElse: () => opt.values.first,
             );
             if (heightAttrValue.isAvailable) {
-              // Current selection is still available - keep it
-              // Use value's name (e.g. "2 CM") for selectedValue so UI displays correctly
               final valueNameToUse = heightAttrValue.name;
               if (opt.selectedValue != valueNameToUse) {
                 recomputedOptions[i] = VariantAttributeOption(
                   attributeName: opt.attributeName,
                   values: opt.values,
                   selectedValue: valueNameToUse,
-                  apiAttributeName: opt.apiAttributeName,
-                  attributeId: opt.attributeId,
-                );
-              }
-            } else {
-              // Current selection is not available - find first available
-              final firstAvailable = opt.values.firstWhere(
-                (v) => v.isAvailable,
-                orElse: () => opt.values.first,
-              );
-              if (firstAvailable.isAvailable) {
-                final newHeight = double.tryParse(firstAvailable.name);
-                if (newHeight != null) {
-                  nextSelectedHeelHeight = newHeight;
-                  recomputedOptions[i] = VariantAttributeOption(
-                    attributeName: opt.attributeName,
-                    values: opt.values,
-                    selectedValue: firstAvailable.name,
-                    apiAttributeName: opt.apiAttributeName,
-                    attributeId: opt.attributeId,
-                  );
-                } else {
-                  nextSelectedHeelHeight = null;
-                }
-              } else {
-                // PRESERVE: No height marked available - keep current selection (heightAttrValue
-                // was found via numeric match). Prevents deselecting when availability logic
-                // has edge cases (e.g. color/format mismatch).
-                final preservedValues = opt.values.map((v) {
-                  final matches = double.tryParse(v.name.replaceAll(RegExp(r'[^0-9.]'), '')) != null &&
-                      (double.tryParse(v.name.replaceAll(RegExp(r'[^0-9.]'), ''))! - currentHeight).abs() < 0.01;
-                  return VariantAttributeValue(
-                    id: v.id,
-                    name: v.name,
-                    isAvailable: v.isAvailable,
-                    isSelected: matches,
-                  );
-                }).toList();
-                recomputedOptions[i] = VariantAttributeOption(
-                  attributeName: opt.attributeName,
-                  values: preservedValues,
-                  selectedValue: heightAttrValue.name,
-                  apiAttributeName: opt.apiAttributeName,
-                  attributeId: opt.attributeId,
-                );
-                // nextSelectedHeelHeight stays as currentHeight (already set from currentProduct)
-              }
-            }
-          } else if (opt.values.isNotEmpty) {
-            // No current selection - use first available
-            final firstAvailable = opt.values.firstWhere(
-              (v) => v.isAvailable,
-              orElse: () => opt.values.first,
-            );
-            if (firstAvailable.isAvailable) {
-              final newHeight = double.tryParse(firstAvailable.name);
-              if (newHeight != null) {
-                nextSelectedHeelHeight = newHeight;
-                recomputedOptions[i] = VariantAttributeOption(
-                  attributeName: opt.attributeName,
-                  values: opt.values,
-                  selectedValue: firstAvailable.name,
                   apiAttributeName: opt.apiAttributeName,
                   attributeId: opt.attributeId,
                 );
@@ -3495,164 +3342,80 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         accessoryProducts: currentProduct.accessoryProducts,
         alternativeProducts: currentProduct.alternativeProducts,
         variantCombinations: currentProduct.variantCombinations,
-        attributeVariantCombinations: currentProduct.attributeVariantCombinations,
-        attributeValueCombinationsByKey: currentProduct.attributeValueCombinationsByKey,
         primaryVariantLabel: currentProduct.primaryVariantLabel,
         tags: currentProduct.tags,
         variantImagesMap: currentProduct.variantImagesMap,
       );
-
-      // NEW: When using attribute_value_combinations, resolve the selection purely
-      // from backend-provided combinations (id + value), and use that to drive
-      // stock, quantity and attribute availability.
+      
+      // Sync stock & quantity with the newly selected variant
+      // IMPORTANT: When color changes, we need to find variant matching size+color only
+      // Other attributes (material, heel height) might not match the new color variant
       int nextQuantity = currentState.quantity;
-      if (updatedProduct.attributeVariantCombinations.isNotEmpty) {
-        final selectedIds = _getSelectedAttributeValueIds(updatedProduct);
-        final selection =
-            updatedProduct.resolveSelectionFromAttributeCombinations(selectedIds);
-        final enabledIds = selection.enabledValueIds;
-        final matched = selection.matchedVariant;
-
-        // Update availability of dynamic attributes based on enabled ids.
-        final updatedVariantAttributeOptions2 =
-            updatedProduct.variantAttributeOptions.map((opt) {
-          final newValues = opt.values.map((v) {
-            final intId = int.tryParse(v.id.toString());
-            final isAvailable =
-                intId != null && enabledIds.contains(intId);
-            return VariantAttributeValue(
-              id: v.id,
-              name: v.name,
-              isAvailable: isAvailable,
-              isSelected: v.isSelected,
-            );
-          }).toList();
-          return VariantAttributeOption(
-            attributeName: opt.attributeName,
-            values: newValues,
-            selectedValue: opt.selectedValue,
-            apiAttributeName: opt.apiAttributeName,
-            attributeId: opt.attributeId,
-          );
-        }).toList();
-
-        // Update availability of colors and sizes based on enabled ids.
-        final updatedColorOptions2 = updatedProduct.colorOptions.map((c) {
-          final intId = int.tryParse(c.id.toString());
-          final isAvailable =
-              intId != null && enabledIds.contains(intId);
-          return ColorOption(
-            id: c.id,
-            name: c.name,
-            displayName: c.displayName,
-            code: c.code,
-            images: c.images,
-            isSelected: c.isSelected,
-            isAvailable: isAvailable,
-          );
-        }).toList();
-
-        final updatedSizeOptions2 = updatedProduct.sizeOptions.map((s) {
-          final intId = int.tryParse(s.id.toString());
-          final isAvailable =
-              intId != null && enabledIds.contains(intId);
-          return SizeOption(
-            id: s.id,
-            name: s.name,
-            isAvailable: isAvailable,
-            isRecommended: s.isRecommended,
-            isSelected: s.isSelected,
-          );
-        }).toList();
-
-        bool finalInStock = false;
-        int? qtyForBadge;
-
-        if (matched != null) {
-          int available = matched.quantityAvailable.toInt();
-
-          // Subtract what is already in the cart for this variant.
-          if (cartBloc.state is CartLoaded) {
-            final cartState = cartBloc.state as CartLoaded;
-            try {
-              final existingItem = cartState.cartItems.firstWhere(
-                (item) => item.product.id.toString() == matched.variantId.toString(),
-              );
-              available -= existingItem.quantity;
-            } catch (_) {
-              // Not in cart → keep full available.
-            }
-          }
-
-          if (!matched.inStock || available <= 0) {
-            finalInStock = false;
-            nextQuantity = 1;
-            qtyForBadge = 0;
-          } else {
-            finalInStock = true;
-            if (nextQuantity > available) nextQuantity = available;
-            if (nextQuantity <= 0) nextQuantity = 1;
-            qtyForBadge = available;
-          }
-        } else {
-          // No matching variant for this selection → out of stock.
-          finalInStock = false;
-          nextQuantity = 1;
-          qtyForBadge = null;
-        }
-
-        updatedProduct = updatedProduct.copyWith(
-          colorOptions: updatedColorOptions2,
-          sizeOptions: updatedSizeOptions2,
-          variantAttributeOptions: updatedVariantAttributeOptions2,
-          inStock: finalInStock,
-          selectedVariantQuantityAvailable: qtyForBadge,
-        );
-
-        // Update images only when color changes: use variant_id from first
-        // variant matching selected color (variantImagesMap = multiple images per variant).
-        final vid = updatedProduct.variantIdForImagesByColor;
-        if (vid != null && vid.isNotEmpty) {
-          updatedProduct = updatedProduct.withImagesForVariant(vid);
-          debugPrint(
-              '🎨 _onSelectColor: images from variantIdByColor=$vid (${updatedProduct.images.length} images)');
-        } else if (selectedColorOption.images.isNotEmpty) {
-          updatedProduct = updatedProduct.copyWith(
-              images: List<String>.from(selectedColorOption.images));
-          debugPrint(
-              '🎨 Using ColorOption.images: ${selectedColorOption.images.length} (${selectedColorOption.displayNameOrName})');
-        }
-
-        emit(ProductDetailsLoaded(
-          updatedProduct,
-          quantity: nextQuantity,
-          isAdding: false,
-        ));
-
-        // Still call backend selectColor usecase to keep server in sync,
-        // but do not re-emit its result.
-        final result = await selectColor(SelectColorParams(
-          productId: event.productId,
-          colorId: event.colorId,
-        ));
-        result.fold(
-          (failure) => emit(ProductDetailsError(failure.message)),
-          (_) {},
-        );
-        return;
+      VariantCombination? selectedVariant;
+      
+      // First try exact match (all attributes)
+      selectedVariant = _findSelectedVariant(updatedProduct);
+      
+      if (selectedVariant != null) {
+        debugPrint('🎨 COLOR CHANGED → Found EXACT MATCH variant_id=${selectedVariant.variantId} for color="${updatedProduct.selectedColor}", size="${updatedProduct.selectedSize}"');
+        print('🎨🎨🎨 COLOR CHANGED → VARIANT_ID: ${selectedVariant.variantId} 🎨🎨🎨');
       }
       
-      // Legacy fallback path when attributeVariantCombinations is not available.
-      // Sync stock & quantity with the newly selected variant using old logic.
-      int nextQuantityLegacy = currentState.quantity;
-      final VariantCombination? selectedVariant = updatedProduct.selectedColor.isNotEmpty
-          ? updatedProduct.getFirstInStockVariantForColor(updatedProduct.selectedColor)
-          : null;
+      // If no exact match found, try flexible match (size + color only)
+      if (selectedVariant == null && updatedProduct.selectedSize.isNotEmpty && updatedProduct.selectedColor.isNotEmpty) {
+        debugPrint('🔍 No exact variant match found, trying flexible match (size + color only)...');
+        String normalize(String s) => s.toLowerCase().trim();
+        
+        // Helper to get color value from variant
+        String? getVariantColorValue(VariantCombination v) {
+          final colorAttrNames = ['COLOR NAME', 'color name', 'Color Name', 'color', 'Color', 'COLOR', 'colour', 'Colour', 'اللون', 'لون'];
+          for (final attrName in colorAttrNames) {
+            final value = v.getAttributeValue(attrName);
+            if (value != null && value.isNotEmpty) {
+              return value;
+            }
+          }
+          return null;
+        }
+        
+        final normalizedSelectedColor = normalize(updatedProduct.selectedColor);
+        final flexibleMatch = updatedProduct.variantCombinations.where((combo) {
+          // Must match size
+          bool sizeMatch = combo.hasAttributeValue('SIZE', updatedProduct.selectedSize) ||
+                          combo.hasAttributeValue('size', updatedProduct.selectedSize) ||
+                          combo.hasAttributeValue(updatedProduct.primaryVariantLabel, updatedProduct.selectedSize);
+          
+          if (!sizeMatch) return false;
+          
+          // Must match color (with normalization for better matching)
+          final variantColorName = getVariantColorValue(combo);
+          if (variantColorName == null) return false;
+          
+          final normalizedVariantColor = normalize(variantColorName);
+          bool colorMatch = normalizedVariantColor == normalizedSelectedColor ||
+                           normalizedVariantColor.contains(normalizedSelectedColor) ||
+                           normalizedSelectedColor.contains(normalizedVariantColor);
+          
+          return colorMatch;
+        }).toList();
+        
+        if (flexibleMatch.isNotEmpty) {
+          selectedVariant = flexibleMatch.first;
+          debugPrint('✅ Found flexible match variant_id=${selectedVariant.variantId} for color=${updatedProduct.selectedColor}, size=${updatedProduct.selectedSize}');
+        }
+        
+        if (flexibleMatch.isNotEmpty) {
+          // Sort by highest stock
 
-      if (selectedVariant != null) {
-        debugPrint('🎨 COLOR CHANGED → getFirstInStockVariantForColor: variantId=${selectedVariant.variantId}, inStock=${selectedVariant.inStock}, quantityAvailable=${selectedVariant.quantityAvailable}');
-      } else {
-        debugPrint('🎨 COLOR CHANGED → getFirstInStockVariantForColor: no in-stock variant for color="${updatedProduct.selectedColor}"');
+          flexibleMatch.sort((a, b) {
+            final qtyA = a.quantityAvailable ?? 0;
+            final qtyB = b.quantityAvailable ?? 0;
+            return qtyB.compareTo(qtyA);
+          });
+          selectedVariant = flexibleMatch.first;
+          debugPrint('✅ Flexible match found: variantId=${selectedVariant.variantId}, quantityAvailable=${selectedVariant.quantityAvailable}');
+          print('🎨🎨🎨 COLOR CHANGED → VARIANT_ID (FLEXIBLE MATCH): ${selectedVariant.variantId} 🎨🎨🎨');
+        }
       }
       
       // CRITICAL: When size is selected, use hasInStockVariant as the primary source of truth
@@ -3717,34 +3480,191 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
           );
         }
 
-        // CRITICAL: If size is selected, prefer hasInStockVariant check over variant match
-        // This ensures we correctly reflect stock for the exact color+size combination
-        // Use matched variant as single source of truth (same variant used for images)
-        finalInStock = variantInStock;
+        // Don't set inStock from variant match - only set from combination validation
+        // Keep finalInStock as false until combination matches exactly
+        finalInStock = false; // Don't show in stock until combination matches
         debugPrint(
-          '📦 _onSelectColor → variantId=${selectedVariant.variantId}, inStock=$variantInStock, qty=${selectedVariant.quantityAvailable}',
+          '📦 _onSelectColor → variantId=${selectedVariant.variantId}, but inStock=false until combination matches',
         );
       } else {
-        // No variant found - use hasInStockVariant check result
-        if (actualSize != null && actualSize.isNotEmpty) {
-          finalInStock = hasInStockVariant;
-          debugPrint('📦 No variant match: Using hasInStockVariant=$hasInStockVariant for color="$colorNameForMatching" with size="$actualSize"');
-        } else {
-          finalInStock = hasInStockVariant;
-          debugPrint('📦 No variant match: Using hasInStockVariant=$hasInStockVariant for color="$colorNameForMatching" (no size selected)');
-        }
-        if (!finalInStock) {
-          nextQuantity = 1;
-        }
+        // No variant found - set to false until combination matches
+        finalInStock = false; // Don't show in stock until combination matches
+        debugPrint('📦 No variant match: inStock=false until combination matches for color="$colorNameForMatching"');
+        nextQuantity = 1;
       }
       
-      final int? qtyForBadge = selectedVariant?.quantityAvailable != null
-          ? selectedVariant!.quantityAvailable!.toInt()
-          : null;
-      updatedProduct = updatedProduct.copyWith(
-        inStock: finalInStock,
-        selectedVariantQuantityAvailable: qtyForBadge,
-      );
+      // Step 1: Send only the clicked color value id to the loop; get available combination.
+      // Use the same validation logic as other attributes: compare selected ids with available combination ids.
+      if (updatedProduct.attributeVariantCombinations.isNotEmpty ||
+          updatedProduct.attributeValueCombinationsByKey.isNotEmpty) {
+        final colorValueId = event.colorId.toString();
+        debugPrint(
+          '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+        );
+        debugPrint(
+          '🎯 [SelectColor] Attribute: COLOR | Selected ID: $colorValueId',
+        );
+        debugPrint(
+          '📤 [Send to Loop] Color attribute value id: $colorValueId',
+        );
+        final comboFromLoop = updatedProduct.findMatchingComboByClickedValueId(colorValueId);
+        debugPrint(
+          '📥 [Get from Loop] Matched: ${comboFromLoop != null} | Variant ID: ${comboFromLoop?.variantId}',
+        );
+
+        if (comboFromLoop != null) {
+          // Step 2: Extract available combination ids from the combo (list of value ids in this combo).
+          final availableCombinationIds = comboFromLoop.values.map((v) => v.id).toSet();
+          debugPrint(
+            '📋 [Available Combination IDs] From loop response: $availableCombinationIds',
+          );
+          // Show detailed breakdown of each attribute in the combo
+          debugPrint(
+            '   📋 [Combo Details]',
+          );
+          for (final comboVal in comboFromLoop.values) {
+            final attrSlug = ProductDetails.attributeNameToComboSlug(
+              comboVal.value.split('-').first.trim(),
+            );
+            debugPrint(
+              '      - Attribute: $attrSlug | Value ID: ${comboVal.id} | Value: "${comboVal.value}"',
+            );
+          }
+
+          // Step 3: Normalize ONLY the clicked color id from combo - don't change other attributes.
+          // This ensures only the clicked color is updated, other attributes stay as user selected them.
+          final colorAttrSlug = ProductDetails.attributeNameToComboSlug('color');
+          updatedProduct = _normalizeAttributeIdsFromCombo(updatedProduct, comboFromLoop, clickedAttributeSlug: colorAttrSlug);
+
+          // Step 4: Get full current selection (all selected attribute ids) with normalized ids.
+          // Build selection that includes ALL attributes from combo, even if selectedValue is empty.
+          final fullSelection = updatedProduct.getSelectedAttributeSlugToValueId();
+          // Also include attributes from combo that might not be in selectedValue (use isSelected flag)
+          final comboBasedSelection = <String, int>{};
+          for (final comboVal in comboFromLoop.values) {
+            final comboValueStr = comboVal.value;
+            final idx = comboValueStr.indexOf('-');
+            if (idx <= 0) continue;
+            final attrPart = comboValueStr.substring(0, idx).trim();
+            final attrSlug = ProductDetails.attributeNameToComboSlug(attrPart);
+            if (attrSlug.isEmpty) continue;
+            comboBasedSelection[attrSlug] = comboVal.id;
+          }
+          // Merge: combo-based selection takes precedence (source of truth), then add any other selected
+          final mergedSelection = <String, int>{...comboBasedSelection, ...fullSelection};
+          final selectedIds = mergedSelection.values.toSet();
+          debugPrint(
+            '📋 [Selected IDs] Current selection (all attributes): $selectedIds',
+          );
+          // Show detailed breakdown of each selected attribute
+          debugPrint(
+            '   📋 [Selection Details]',
+          );
+          debugPrint(
+            '   📋 [From Combo] Combo-based selection: $comboBasedSelection',
+          );
+          debugPrint(
+            '   📋 [From Options] variantAttributeOptions selection: $fullSelection',
+          );
+          debugPrint(
+            '   📋 [Merged] Final merged selection: $mergedSelection',
+          );
+          for (final entry in mergedSelection.entries) {
+            final source = comboBasedSelection.containsKey(entry.key) ? 'combo' : 'options';
+            debugPrint(
+              '      - Attribute: ${entry.key} | Selected ID: ${entry.value} (from $source)',
+            );
+          }
+
+          // Step 5: Validate: compare selected ids (with normalized attribute ids) with available combination ids.
+          // Exclude the color attribute from validation (we're validating OTHER attributes match)
+          // Use colorAttrSlug already declared above for normalization
+          // Remove color attribute from mergedSelection for validation
+          final selectedForValidation = Map<String, int>.from(mergedSelection);
+          selectedForValidation.remove(colorAttrSlug);
+          // Also try removing by other possible color slugs
+          selectedForValidation.remove('color');
+          selectedForValidation.remove('اللون');
+          final selectedIdsForValidation = selectedForValidation.values.toSet();
+          // Remove color ID from available combination IDs
+          final colorIdInCombo = comboBasedSelection[colorAttrSlug] ?? 
+                                 comboBasedSelection['color'] ?? 
+                                 comboBasedSelection['اللون'];
+          final availableIdsForValidation = colorIdInCombo != null
+              ? availableCombinationIds.where((id) => id != colorIdInCombo).toSet()
+              : availableCombinationIds;
+          
+          final idsMatch = selectedIdsForValidation.length == availableIdsForValidation.length &&
+              selectedIdsForValidation.containsAll(availableIdsForValidation);
+          debugPrint(
+            '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+          );
+          debugPrint(
+            '✅ [Validate] Comparing (excluding color attribute "$colorAttrSlug", ID: $colorIdInCombo):',
+          );
+          debugPrint(
+            '   Selected IDs (all):     $selectedIds',
+          );
+          debugPrint(
+            '   Selected IDs (for validation, excluding clicked):     $selectedIdsForValidation',
+          );
+          debugPrint(
+            '   Available IDs (all):    $availableCombinationIds',
+          );
+          debugPrint(
+            '   Available IDs (for validation, excluding clicked):    $availableIdsForValidation',
+          );
+          debugPrint(
+            '   Match Result:     ${idsMatch ? "✅ MATCH" : "❌ NO MATCH"}',
+          );
+          debugPrint(
+            '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+          );
+
+          if (idsMatch) {
+            // Exact match → use combo for stock badge (in stock, low stock, etc.)
+            final combo = comboFromLoop;
+            finalInStock = combo.inStock && combo.quantityAvailable > 0;
+            final qty = combo.quantityAvailable.toInt();
+            updatedProduct = updatedProduct.copyWith(
+              inStock: finalInStock,
+              selectedVariantQuantityAvailable: qty,
+            );
+            debugPrint(
+              '📦 _onSelectColor → ✅ Match! colorId=$colorValueId → variantId=${combo.variantId}, inStock=$finalInStock, qty=$qty',
+            );
+          } else {
+            // No match → out of stock
+            finalInStock = false;
+            updatedProduct = updatedProduct.copyWith(
+              inStock: false,
+              selectedVariantQuantityAvailable: 0,
+            );
+            debugPrint(
+              '📦 _onSelectColor → ❌ No match: selectedIdsForValidation=$selectedIdsForValidation ≠ availableIdsForValidation=$availableIdsForValidation → out of stock',
+            );
+          }
+        } else {
+          // No combo from loop → out of stock
+          finalInStock = false;
+          updatedProduct = updatedProduct.copyWith(
+            inStock: false,
+            selectedVariantQuantityAvailable: 0,
+          );
+          debugPrint(
+            '📦 _onSelectColor → ❌ No combo from loop for colorId=$colorValueId → out of stock',
+          );
+        }
+      } else {
+        // Fallback: use variant_combinations logic when attribute_value_combinations not available
+        final int? qtyForBadge = selectedVariant?.quantityAvailable != null
+            ? selectedVariant!.quantityAvailable!.toInt()
+            : null;
+        updatedProduct = updatedProduct.copyWith(
+          inStock: finalInStock,
+          selectedVariantQuantityAvailable: qtyForBadge,
+        );
+      }
 
       // Update images only when color changes: use variant_id from first variant matching selected color (variantImagesMap = multiple images per variant).
       final vid = updatedProduct.variantIdForImagesByColor;
@@ -3756,6 +3676,12 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         debugPrint('🎨 Using ColorOption.images: ${selectedColorOption.images.length} (${selectedColorOption.displayNameOrName})');
       }
       // If still no update (no variant for color, no option images), keep current images to avoid blank.
+
+      debugPrint('🔴 [_onSelectColor] EMITTING: selectedSize="${updatedProduct.selectedSize}" selectedColor="${updatedProduct.selectedColor}"');
+      for (final opt in updatedProduct.variantAttributeOptions) {
+        debugPrint('🔴 [_onSelectColor]   attr="${opt.attributeName}" selectedValue="${opt.selectedValue}"');
+      }
+      debugPrint('🔴 [_onSelectColor] ═══════════════════════════════════════');
 
       emit(ProductDetailsLoaded(updatedProduct, quantity: nextQuantity, isAdding: false));
       
@@ -3780,97 +3706,17 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
     SelectSizeEvent event,
     Emitter<ProductDetailsState> emit,
   ) async {
-    debugPrint('🚀 ========== _onSelectSize CALLED ==========');
-    debugPrint('🚀 Size ID selected: ${event.sizeId}');
+    debugPrint('🔴 [_onSelectSize] ═══════════════════════════════════════');
+    debugPrint('🔴 [_onSelectSize] EVENT RECEIVED (USER TAPPED SIZE BUTTON) sizeId=${event.sizeId}');
     
     if (state is ProductDetailsLoaded) {
       final currentState = state as ProductDetailsLoaded;
       final currentProduct = currentState.productDetails;
-      debugPrint('🚀 Product loaded: ${currentProduct.name}');
-
-      // Use attribute_value_combinations flow: send ONLY clicked size name.
-      if (currentProduct.attributeValueCombinationsByKey.isNotEmpty) {
-        String selectedSizeName = '';
-        for (final s in currentProduct.sizeOptions) {
-          if (s.id.toString().trim() == event.sizeId.toString().trim()) {
-            selectedSizeName = s.name;
-            break;
-          }
-        }
-        if (selectedSizeName.isEmpty) {
-          for (final opt in currentProduct.variantAttributeOptions) {
-            if (_norm(opt.attributeName) == 'size' ||
-                _norm(opt.attributeName) == currentProduct.primaryVariantLabel.toLowerCase()) {
-              try {
-                final v = opt.values.firstWhere(
-                  (x) => x.id.toString().trim() == event.sizeId.toString().trim(),
-                );
-                selectedSizeName = v.name;
-                break;
-              } catch (_) {}
-            }
-          }
-        }
-        if (selectedSizeName.isNotEmpty) {
-          debugPrint(
-            '📦 [attribute_value_combinations] SelectSize: sending ONLY clicked value name: "$selectedSizeName"',
-          );
-          final selection = currentProduct.resolveSelectionByClickedValue(
-            selectedSizeName,
-          );
-          var updatedPd = currentProduct.copyWith(
-            selectedSize: selectedSizeName,
-            sizeOptions: currentProduct.sizeOptions.map((s) {
-              return SizeOption(
-                id: s.id,
-                name: s.name,
-                isAvailable: s.isAvailable,
-                isRecommended: s.isRecommended,
-                isSelected: s.id.toString().trim() == event.sizeId.toString().trim(),
-              );
-            }).toList(),
-            variantAttributeOptions: currentProduct.variantAttributeOptions.map((opt) {
-              if (_norm(opt.attributeName) != 'size' &&
-                  _norm(opt.attributeName) != currentProduct.primaryVariantLabel.toLowerCase()) {
-                return opt;
-              }
-              return VariantAttributeOption(
-                attributeName: opt.attributeName,
-                values: opt.values.map((v) {
-                  return VariantAttributeValue(
-                    id: v.id,
-                    name: v.name,
-                    isAvailable: v.isAvailable,
-                    isSelected: v.id.toString().trim() == event.sizeId.toString().trim(),
-                  );
-                }).toList(),
-                selectedValue: selectedSizeName,
-                apiAttributeName: opt.apiAttributeName,
-                attributeId: opt.attributeId,
-              );
-            }).toList(),
-          );
-          final sizeAttrName = currentProduct.variantAttributeOptions
-                  .where((o) =>
-                      _norm(o.attributeName) == 'size' ||
-                      _norm(o.attributeName) == currentProduct.primaryVariantLabel.toLowerCase())
-                  .map((o) => o.attributeName)
-                  .firstOrNull ??
-              (currentProduct.primaryVariantLabel.isNotEmpty
-                  ? currentProduct.primaryVariantLabel
-                  : 'Size');
-          final result = _applyAttributeCombinationsFlowFromResult(
-            updatedPd,
-            selection,
-            currentState.quantity,
-            skipSuggestedSelectionForAttribute: sizeAttrName,
-          );
-          final finalProduct = _syncSelectedFieldsFromVariantOptions(result.product);
-          emit(ProductDetailsLoaded(finalProduct, quantity: result.quantity, isAdding: false));
-          return;
-        }
+      debugPrint('🔴 [_onSelectSize] BEFORE: selectedSize="${currentProduct.selectedSize}" selectedColor="${currentProduct.selectedColor}"');
+      for (final opt in currentProduct.variantAttributeOptions) {
+        debugPrint('🔴 [_onSelectSize]   attr="${opt.attributeName}" selectedValue="${opt.selectedValue}"');
       }
-
+      
       // Find the selected size.
       // NOTE: Backend sometimes sends sizeOptions as empty, but we still have sizes
       // inside variantAttributeOptions. In that case we synthesize sizeOptions
@@ -3930,23 +3776,25 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         }
       }
       if (sizeAttrForResolve != null) {
+        final sizeIdStr = event.sizeId.toString().trim();
         try {
           final matchedValue = sizeAttrForResolve.values.firstWhere(
-            (v) => v.id == event.sizeId,
+            (v) => v.id.toString().trim() == sizeIdStr,
           );
           selectedSizeName = matchedValue.name;
-          debugPrint('📏 _onSelectSize: resolved sizeId=${event.sizeId} → name="$selectedSizeName" from variantAttributeOptions (same source as size buttons)');
+          debugPrint('📏 _onSelectSize: resolved sizeId=$sizeIdStr (value id for "$selectedSizeName") → name="$selectedSizeName"');
         } catch (_) {
           final selectedSizeOption = effectiveSizeOptions.firstWhere(
-            (size) => size.id == event.sizeId,
+            (size) => size.id.toString().trim() == sizeIdStr,
             orElse: () => effectiveSizeOptions.first,
           );
           selectedSizeName = selectedSizeOption.name;
-          debugPrint('📏 _onSelectSize: sizeId not in variantAttributeOptions, using SizeOption: name="$selectedSizeName"');
+          debugPrint('📏 _onSelectSize: sizeId $sizeIdStr not in variantAttributeOptions, using SizeOption: name="$selectedSizeName"');
         }
       } else {
+        final sizeIdStr = event.sizeId.toString().trim();
         final selectedSizeOption = effectiveSizeOptions.firstWhere(
-          (size) => size.id == event.sizeId,
+          (size) => size.id.toString().trim() == sizeIdStr,
           orElse: () => effectiveSizeOptions.first,
         );
         selectedSizeName = selectedSizeOption.name;
@@ -4165,12 +4013,209 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         variantAttributeOptions: updatedVariantAttributeOptions,
       );
 
-      final selectedVariant = _findSelectedVariant(productToEmit);
       int nextQuantity = currentState.quantity;
       bool inStock = hasAvailableVariantForSelection;
+      VariantCombination? selectedVariant = _findSelectedVariant(productToEmit);
 
-      if (selectedVariant != null) {
-        inStock = _isVariantInStock(selectedVariant);
+      // Step 1: Send only the size attribute value id to the loop; get available combination.
+      if (productToEmit.attributeVariantCombinations.isNotEmpty ||
+          productToEmit.attributeValueCombinationsByKey.isNotEmpty) {
+        debugPrint(
+          '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+        );
+        debugPrint(
+          '🎯 [SelectSize] Attribute: SIZE | Selected ID: ${event.sizeId}',
+        );
+        debugPrint(
+          '📤 [Send to Loop] Size attribute value id: ${event.sizeId}',
+        );
+        final comboFromLoop = productToEmit.findMatchingComboByClickedValueId(event.sizeId);
+        debugPrint(
+          '📥 [Get from Loop] Matched: ${comboFromLoop != null} | Variant ID: ${comboFromLoop?.variantId}',
+        );
+
+        if (comboFromLoop != null) {
+          // Step 2: Extract available combination ids from the combo (list of value ids in this combo).
+          final availableCombinationIds = comboFromLoop.values.map((v) => v.id).toSet();
+          debugPrint(
+            '📋 [Available Combination IDs] From loop response: $availableCombinationIds',
+          );
+          // Show detailed breakdown of each attribute in the combo
+          debugPrint(
+            '   📋 [Combo Details]',
+          );
+          for (final comboVal in comboFromLoop.values) {
+            final attrSlug = ProductDetails.attributeNameToComboSlug(
+              comboVal.value.split('-').first.trim(),
+            );
+            debugPrint(
+              '      - Attribute: $attrSlug | Value ID: ${comboVal.id} | Value: "${comboVal.value}"',
+            );
+          }
+
+          // Step 3: Normalize ONLY the clicked size id from combo - don't change other attributes.
+          // This ensures only the clicked size is updated, other attributes stay as user selected them.
+          final sizeAttrSlug = ProductDetails.attributeNameToComboSlug(
+            productToEmit.primaryVariantLabel.isNotEmpty 
+                ? productToEmit.primaryVariantLabel 
+                : 'size'
+          );
+          productToEmit = _normalizeAttributeIdsFromCombo(productToEmit, comboFromLoop, clickedAttributeSlug: sizeAttrSlug);
+
+          // Step 4: Get full current selection (all selected attribute ids) with normalized ids.
+          // Build selection that includes ALL attributes from combo, even if selectedValue is empty.
+          final fullSelection = productToEmit.getSelectedAttributeSlugToValueId();
+          // Also include attributes from combo that might not be in selectedValue (use isSelected flag)
+          final comboBasedSelection = <String, int>{};
+          for (final comboVal in comboFromLoop.values) {
+            final comboValueStr = comboVal.value;
+            final idx = comboValueStr.indexOf('-');
+            if (idx <= 0) continue;
+            final attrPart = comboValueStr.substring(0, idx).trim();
+            final attrSlug = ProductDetails.attributeNameToComboSlug(attrPart);
+            if (attrSlug.isEmpty) continue;
+            comboBasedSelection[attrSlug] = comboVal.id;
+          }
+          // Merge: combo-based selection takes precedence (source of truth), then add any other selected
+          final mergedSelection = <String, int>{...comboBasedSelection, ...fullSelection};
+          final selectedIds = mergedSelection.values.toSet();
+          debugPrint(
+            '📋 [Selected IDs] Current selection (all attributes): $selectedIds',
+          );
+          // Show detailed breakdown of each selected attribute
+          debugPrint(
+            '   📋 [Selection Details]',
+          );
+          debugPrint(
+            '   📋 [From Combo] Combo-based selection: $comboBasedSelection',
+          );
+          debugPrint(
+            '   📋 [From Options] variantAttributeOptions selection: $fullSelection',
+          );
+          debugPrint(
+            '   📋 [Merged] Final merged selection: $mergedSelection',
+          );
+          for (final entry in mergedSelection.entries) {
+            final source = comboBasedSelection.containsKey(entry.key) ? 'combo' : 'options';
+            debugPrint(
+              '      - Attribute: ${entry.key} | Selected ID: ${entry.value} (from $source)',
+            );
+          }
+
+          // Step 5: Validate: compare selected ids (with normalized attribute ids) with available combination ids.
+          // Exclude the size attribute from validation (we're validating OTHER attributes match)
+          // Use sizeAttrSlug already declared above for normalization
+          // Find size ID from mergedSelection - check all possible size slugs
+          final sizeIdInSelection = mergedSelection[sizeAttrSlug] ?? 
+                                    mergedSelection['size'] ?? 
+                                    mergedSelection['المقاس'] ??
+                                    mergedSelection['القياس'];
+          // Remove size attribute from mergedSelection for validation - try all possible size slugs
+          final selectedForValidation = Map<String, int>.from(mergedSelection);
+          selectedForValidation.remove(sizeAttrSlug);
+          selectedForValidation.remove('size');
+          selectedForValidation.remove('المقاس');
+          selectedForValidation.remove('القياس');
+          // Also find and remove by ID if we found the size ID
+          if (sizeIdInSelection != null) {
+            selectedForValidation.removeWhere((key, value) => value == sizeIdInSelection);
+          }
+          final selectedIdsForValidation = selectedForValidation.values.toSet();
+          // Remove size ID from available combination IDs (if it exists in combo, otherwise just use available as-is)
+          final sizeIdInCombo = comboBasedSelection[sizeAttrSlug] ?? 
+                                comboBasedSelection['size'] ?? 
+                                comboBasedSelection['المقاس'] ??
+                                comboBasedSelection['القياس'];
+          final availableIdsForValidation = sizeIdInCombo != null
+              ? availableCombinationIds.where((id) => id != sizeIdInCombo).toSet()
+              : availableCombinationIds;
+          
+          debugPrint(
+            '   🔍 [Size Exclusion] sizeAttrSlug=$sizeAttrSlug, sizeIdInSelection=$sizeIdInSelection, sizeIdInCombo=$sizeIdInCombo',
+          );
+          debugPrint(
+            '   🔍 [Size Exclusion] mergedSelection keys before removal: ${mergedSelection.keys.toList()}',
+          );
+          debugPrint(
+            '   🔍 [Size Exclusion] selectedForValidation keys after removal: ${selectedForValidation.keys.toList()}',
+          );
+          
+          final idsMatch = selectedIdsForValidation.length == availableIdsForValidation.length &&
+              selectedIdsForValidation.containsAll(availableIdsForValidation);
+          debugPrint(
+            '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+          );
+          debugPrint(
+            '✅ [Validate] Comparing (excluding size attribute "$sizeAttrSlug", sizeIdInSelection=$sizeIdInSelection, sizeIdInCombo=$sizeIdInCombo):',
+          );
+          debugPrint(
+            '   Selected IDs (all):     $selectedIds',
+          );
+          debugPrint(
+            '   Merged Selection keys: ${mergedSelection.keys.toList()}',
+          );
+          debugPrint(
+            '   Selected IDs (for validation, excluding size):     $selectedIdsForValidation',
+          );
+          debugPrint(
+            '   Available IDs (all):    $availableCombinationIds',
+          );
+          debugPrint(
+            '   Available IDs (for validation, excluding clicked):    $availableIdsForValidation',
+          );
+          debugPrint(
+            '   Match Result:     ${idsMatch ? "✅ MATCH" : "❌ NO MATCH"}',
+          );
+          debugPrint(
+            '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+          );
+
+          if (idsMatch) {
+            // Exact match → use combo for stock badge (in stock, low stock, etc.)
+            final combo = comboFromLoop;
+            inStock = combo.inStock && combo.quantityAvailable > 0;
+            final qty = combo.quantityAvailable.toInt();
+            productToEmit = productToEmit.copyWith(
+              inStock: inStock,
+              selectedVariantQuantityAvailable: qty,
+            );
+            debugPrint(
+              '📦 _onSelectSize → ✅ Match! sizeId=${event.sizeId} → variantId=${combo.variantId}, inStock=$inStock, qty=$qty',
+            );
+            try {
+              final variantIdStr = combo.variantId.toString();
+              selectedVariant = currentProduct.variantCombinations.firstWhere(
+                (v) => v.variantId.toString() == variantIdStr,
+              );
+            } catch (_) {}
+          } else {
+            // No match → out of stock
+            inStock = false;
+            productToEmit = productToEmit.copyWith(
+              inStock: false,
+              selectedVariantQuantityAvailable: 0,
+            );
+            debugPrint(
+              '📦 _onSelectSize → ❌ No match: selectedIdsForValidation=$selectedIdsForValidation ≠ availableIdsForValidation=$availableIdsForValidation → out of stock',
+            );
+          }
+        } else {
+          // No combo from loop → out of stock
+          inStock = false;
+          productToEmit = productToEmit.copyWith(
+            inStock: false,
+            selectedVariantQuantityAvailable: 0,
+          );
+          debugPrint(
+            '📦 _onSelectSize → ❌ No combo from loop for sizeId=${event.sizeId} → out of stock',
+          );
+        }
+      }
+
+      if (selectedVariant != null && productToEmit.attributeVariantCombinations.isEmpty) {
+        // Only use variant-based stock if we don't have attribute combinations validation
+        // But since we're using attribute combinations, this should only be fallback - set to false until match
+        inStock = false; // Don't show in stock until combination matches
         final double? quantityAvailable = selectedVariant.quantityAvailable;
         if (quantityAvailable != null) {
           int existingCart = 0;
@@ -4201,20 +4246,48 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
           selectedVariantQuantityAvailable: qtyForBadge,
         );
         // Images update only on color change; keep current images when size changes.
-        productToEmit =
-            productToEmit.copyWith(images: List<String>.from(currentProduct.images));
+        productToEmit = productToEmit.copyWith(images: List<String>.from(currentProduct.images));
+      } else if (selectedVariant != null && productToEmit.attributeVariantCombinations.isNotEmpty) {
+        // Already set inStock/selectedVariantQuantityAvailable from id-based loop; clamp nextQuantity by cart
+        final int? qtyAvailable = productToEmit.selectedVariantQuantityAvailable;
+        if (qtyAvailable != null) {
+          int existingCart = 0;
+          if (cartBloc.state is CartLoaded) {
+            try {
+              final cartState = cartBloc.state as CartLoaded;
+              final variantIdStr = selectedVariant.variantId.toString();
+              final item = cartState.cartItems.firstWhere(
+                (i) => i.product.id.toString() == variantIdStr,
+              );
+              existingCart = item.quantity;
+            } catch (_) {}
+          }
+          final available = qtyAvailable - existingCart;
+          if (available <= 0) {
+            nextQuantity = 1;
+            productToEmit = productToEmit.copyWith(inStock: false);
+          } else {
+            if (nextQuantity > available) nextQuantity = available;
+            if (nextQuantity <= 0) nextQuantity = 1;
+          }
+        }
+        productToEmit = productToEmit.copyWith(images: List<String>.from(currentProduct.images));
       } else {
-        // No exact variant for this size+color(+other attrs) → treat as out of stock.
         productToEmit = productToEmit.copyWith(
-          inStock: false,
+          inStock: inStock,
           selectedVariantQuantityAvailable: null,
         );
       }
 
       debugPrint(
-        '📦 _onSelectSize → size="$selectedSizeName", color="${selectedColorName ?? 'none'}", '
+        '📦 _onSelectSize → size="$selectedSizeName" (sizeId=${event.sizeId}), color="${selectedColorName ?? 'none'}", '
         'variantId=${selectedVariant?.variantId}, inStock=$inStock, qty=${selectedVariant?.quantityAvailable}',
       );
+      debugPrint('🔴 [_onSelectSize] EMITTING: selectedSize="${productToEmit.selectedSize}" selectedColor="${productToEmit.selectedColor}"');
+      for (final opt in productToEmit.variantAttributeOptions) {
+        debugPrint('🔴 [_onSelectSize]   attr="${opt.attributeName}" selectedValue="${opt.selectedValue}"');
+      }
+      debugPrint('🔴 [_onSelectSize] ═══════════════════════════════════════');
 
       emit(ProductDetailsLoaded(
         productToEmit,
@@ -4223,6 +4296,147 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
       ));
       return;
     }
+  }
+
+  /// Normalizes all attribute ids from combo: updates variantAttributeOptions to use combo's ids.
+  /// This ensures validation uses correct ids for all attributes (color, material, height, width, etc.).
+  /// Combo values format: "اللون-اسود", "height-4.5", "materials-روغان", etc.
+  ProductDetails _normalizeAttributeIdsFromCombo(
+    ProductDetails product,
+    AttributeVariantCombination combo, {
+    String? clickedAttributeSlug,
+  }) {
+    var updatedProduct = product;
+    final updatedOptions = product.variantAttributeOptions.toList();
+    
+    // Parse each combo value to get attribute slug and value id
+    // Only normalize the clicked attribute, skip others to preserve user's selections
+    for (final comboVal in combo.values) {
+      final comboValueStr = comboVal.value;
+      // Parse combo slug: "اللون-اسود" -> ("اللون", "اسود") or "height-4.5" -> ("height", "4.5")
+      // Use the same parsing logic as entity's _parseComboSlug
+      final idx = comboValueStr.indexOf('-');
+      if (idx <= 0) continue; // Skip if no separator found
+      
+      final attrPart = comboValueStr.substring(0, idx).trim();
+      final valuePart = comboValueStr.substring(idx + 1).trim();
+      
+      // Get attribute slug from attribute part (normalize Arabic/English)
+      final attrSlug = ProductDetails.attributeNameToComboSlug(attrPart);
+      if (attrSlug.isEmpty) continue;
+      
+      // Only normalize the clicked attribute - skip others to preserve user's selections
+      if (clickedAttributeSlug != null && attrSlug != clickedAttributeSlug) {
+        debugPrint(
+          '   ⏭️ [Normalize] Skipping attribute (slug=$attrSlug) - not the clicked attribute (clicked=$clickedAttributeSlug)',
+        );
+        continue;
+      }
+      
+      // Find matching attribute option in variantAttributeOptions
+      final attrOptionIndex = updatedOptions.indexWhere(
+        (opt) => ProductDetails.attributeNameToComboSlug(opt.attributeName) == attrSlug,
+      );
+      
+      if (attrOptionIndex >= 0) {
+        final attrOption = updatedOptions[attrOptionIndex];
+        final comboValueId = comboVal.id;
+        
+        // Find the value with combo's id
+        VariantAttributeValue? correctValue;
+        try {
+          correctValue = attrOption.values.firstWhere(
+            (v) => v.id.toString() == comboValueId.toString(),
+          );
+        } catch (_) {
+          // If id not found, try to find by name match (fallback)
+          if (valuePart.isNotEmpty) {
+            String normalize(String s) => s.replaceAll(RegExp(r'[\s\-_]+'), '').toLowerCase();
+            final normalizedCombo = normalize(valuePart);
+            try {
+              correctValue = attrOption.values.firstWhere(
+                (v) => normalize(v.name) == normalizedCombo || 
+                       (v.displayName != null && normalize(v.displayName!) == normalizedCombo),
+              );
+            } catch (_) {
+              // If still not found, skip this attribute (don't update)
+              debugPrint(
+                '   🧬 [Normalize] Attribute "${attrOption.attributeName}" (slug=$attrSlug): Combo id $comboValueId not found in values, skipping',
+              );
+              continue;
+            }
+          } else {
+            continue;
+          }
+        }
+        
+        if (correctValue != null) {
+          // Get old selected id for comparison
+          VariantAttributeValue? oldSelectedValue;
+          try {
+            oldSelectedValue = attrOption.values.firstWhere(
+              (v) => v.isSelected || v.name == attrOption.selectedValue || 
+                     (v.displayName != null && v.displayName == attrOption.selectedValue),
+            );
+          } catch (_) {
+            // If no match found, use first value as fallback
+            if (attrOption.values.isNotEmpty) {
+              oldSelectedValue = attrOption.values.first;
+            }
+          }
+          final oldSelectedId = oldSelectedValue?.id ?? correctValue.id;
+          
+          // Ensure selectedValue is never empty - use name, displayName, or valuePart from combo
+          String selectedValueToStore = correctValue.name;
+          if (selectedValueToStore.isEmpty && correctValue.displayName != null && correctValue.displayName!.isNotEmpty) {
+            selectedValueToStore = correctValue.displayName!;
+          }
+          if (selectedValueToStore.isEmpty && valuePart.isNotEmpty) {
+            selectedValueToStore = valuePart;
+          }
+          if (selectedValueToStore.isEmpty) {
+            // Last resort: use first value's name
+            selectedValueToStore = attrOption.values.first.name;
+          }
+          
+          // Update variantAttributeOptions to store correct id
+          // CRITICAL: Only update selectedValue and isSelected flags if this is the clicked attribute
+          // For other attributes, preserve the existing selectedValue and isSelected flags to prevent unwanted changes
+          final shouldUpdateSelectedValue = clickedAttributeSlug == null || attrSlug == clickedAttributeSlug;
+          updatedOptions[attrOptionIndex] = VariantAttributeOption(
+            attributeName: attrOption.attributeName,
+            values: attrOption.values.map((v) {
+              // Only update isSelected flag if this is the clicked attribute
+              final shouldBeSelected = shouldUpdateSelectedValue 
+                  ? v.id.toString() == comboValueId.toString()
+                  : v.isSelected; // Preserve existing isSelected for non-clicked attributes
+              return VariantAttributeValue(
+                id: v.id,
+                name: v.name,
+                displayName: v.displayName,
+                isAvailable: v.isAvailable,
+                isSelected: shouldBeSelected,
+              );
+            }).toList(),
+            selectedValue: shouldUpdateSelectedValue ? selectedValueToStore : attrOption.selectedValue, // Only update if clicked attribute
+            apiAttributeName: attrOption.apiAttributeName,
+            attributeId: attrOption.attributeId,
+          );
+          
+          if (oldSelectedId.toString() != comboValueId.toString()) {
+            debugPrint(
+              '   🔄 [Normalize] Attribute "${attrOption.attributeName}" (slug=$attrSlug): Updated ID $oldSelectedId → $comboValueId (value="$selectedValueToStore")',
+            );
+          } else {
+            debugPrint(
+              '   ✓ [Normalize] Attribute "${attrOption.attributeName}" (slug=$attrSlug): ID $comboValueId already correct (value="$selectedValueToStore")',
+            );
+          }
+        }
+      }
+    }
+    
+    return updatedProduct.copyWith(variantAttributeOptions: updatedOptions);
   }
 
   /// Helper method to find the currently selected variant based on product details.
@@ -4388,8 +4602,6 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
       return null;
     }
   }
-
-  // NOTE: no _applyLoopStock helper here; stock is computed per-handler.
 
   Future<void> _onAddToCart(
     AddToCartEvent event,
@@ -4810,41 +5022,6 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
     }
   }
 
-  /// Get available quantity for current selection (same logic as bottom sheet).
-  int? _getAvailableQuantityForIncrement(ProductDetails pd) {
-    // 1) attribute_value_combinations: when present, trust BLoC's
-    //    selectedVariantQuantityAvailable (already cart-adjusted).
-    if (pd.attributeVariantCombinations.isNotEmpty ||
-        pd.attributeValueCombinationsByKey.isNotEmpty) {
-      return pd.selectedVariantQuantityAvailable;
-    }
-
-    // 2) Fallback: variant_combinations full selection match.
-    VariantCombination? selectedVariant = _findSelectedVariant(pd);
-    selectedVariant ??= (pd.selectedColor.isNotEmpty &&
-            pd.variantCombinations.isNotEmpty)
-        ? pd.getFirstInStockVariantForColor(pd.selectedColor)
-        : null;
-
-    if (selectedVariant != null && selectedVariant.quantityAvailable != null) {
-      int available = selectedVariant.quantityAvailable!.round();
-      if (cartBloc.state is CartLoaded) {
-        final cartState = cartBloc.state as CartLoaded;
-        try {
-          final existingItem = cartState.cartItems.firstWhere(
-            (item) =>
-                item.product.id.toString() ==
-                selectedVariant!.variantId.toString(),
-          );
-          available = available - existingItem.quantity;
-        } catch (_) {}
-      }
-      if (available >= 0) return available;
-    }
-
-    return null;
-  }
-
   void _onIncrementQty(
     IncrementQuantityEvent event,
     Emitter<ProductDetailsState> emit,
@@ -4852,34 +5029,51 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
     if (state is ProductDetailsLoaded) {
       final s = state as ProductDetailsLoaded;
       final pd = s.productDetails;
-
-      // Use same available logic as "X available" display (variant_combinations + attribute flow)
-      final available = _getAvailableQuantityForIncrement(pd);
-      if (available == null) {
-        debugPrint('⚠️ Cannot determine available quantity, allowing increment');
-        emit(s.copyWith(quantity: s.quantity + 1));
+      
+      // Find the currently selected variant
+      final selectedVariant = _findSelectedVariant(pd);
+      if (selectedVariant == null) {
+        debugPrint('⚠️ Cannot find selected variant, allowing increment');
+        final newQuantity = s.quantity + 1;
+        emit(s.copyWith(quantity: newQuantity));
         return;
       }
-      if (available <= 0) {
-        debugPrint('⚠️ Product is out of stock (available=$available), cannot increment');
+      
+      // Get available quantity for this variant
+      final quantityAvailable = selectedVariant.quantityAvailable ?? double.infinity;
+      if (quantityAvailable == 0) {
+        debugPrint('⚠️ Product is out of stock, cannot increment');
         return;
       }
-
-      // Clamp if current exceeds available (e.g. after variant change)
-      if (s.quantity > available) {
-        debugPrint('⚠️ Clamping quantity from ${s.quantity} to $available');
-        emit(s.copyWith(quantity: available));
+      
+      // Check if there's already an item in cart with this variant ID
+      int existingCartQuantity = 0;
+      if (cartBloc.state is CartLoaded) {
+        final cartState = cartBloc.state as CartLoaded;
+        try {
+          final existingItem = cartState.cartItems.firstWhere(
+            (item) => item.product.id == selectedVariant.variantId,
+          );
+          existingCartQuantity = existingItem.quantity;
+        } catch (e) {
+          // Item not found in cart, existingCartQuantity remains 0
+          debugPrint('ℹ️ Item not found in cart, using 0 for existing quantity');
+        }
+      }
+      
+      // Calculate total quantity (current selection + already in cart)
+      final totalQuantity = s.quantity + existingCartQuantity;
+      final maxAllowed = quantityAvailable.toInt();
+      
+      // Always prevent incrementing if it would exceed available stock
+      if (totalQuantity >= maxAllowed) {
+        debugPrint('⚠️ Cannot increment: total quantity ($totalQuantity) would exceed available stock ($maxAllowed)');
+        // Don't emit error, just silently prevent the increment
         return;
       }
-
-      // Prevent incrementing if already at max
-      if (s.quantity >= available) {
-        debugPrint('⚠️ At max available ($available), cannot increment');
-        return;
-      }
-
+      
       final newQuantity = s.quantity + 1;
-      debugPrint('➕ Incrementing: ${s.quantity} → $newQuantity (available: $available)');
+      debugPrint('➕ Incrementing quantity from ${s.quantity} to $newQuantity (available: $maxAllowed, in cart: $existingCartQuantity)');
       emit(s.copyWith(quantity: newQuantity));
     }
   }
@@ -4900,4 +5094,3 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
     }
   }
 }
-

@@ -3,6 +3,7 @@ import '../../../../../core/services/haptic_service.dart';
 import '../../../../core/theme/app_fonts.dart';
 import '../../../../core/utils/image_cache_utils.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import '../../../../l10n/app_localizations.dart';
 
 import '../../domain/entities/product_details.dart';
 
@@ -48,16 +49,36 @@ class _ProductImageGalleryState extends State<ProductImageGallery> {
     }
   }
 
+  /// Resolve selected ColorOption by matching [productDetails.selectedColor] to
+  /// name or displayName (works for both English and Arabic; selectedColor may be either).
+  ColorOption _findSelectedColorOption() {
+    if (widget.productDetails.colorOptions.isEmpty) {
+      return widget.productDetails.colorOptions.first;
+    }
+    final pd = widget.productDetails;
+    if (pd.selectedColor.isEmpty) {
+      return pd.colorOptions.first;
+    }
+    final sel = pd.selectedColor.toLowerCase().trim();
+    for (final c in pd.colorOptions) {
+      final candidateNames = <String>[
+        c.name.toLowerCase().trim(),
+        (c.displayName ?? c.name).toLowerCase().trim(),
+      ];
+      if (candidateNames.any((n) =>
+          n == sel || (n.isNotEmpty && (n.contains(sel) || sel.contains(n))))) {
+        return c;
+      }
+    }
+    return pd.colorOptions.first;
+  }
+
   List<String> _getCurrentColorImages() {
     if (widget.productDetails.colorOptions.isEmpty) {
       return _dedupeImages(widget.productDetails.images);
     }
-    
-    final selectedColor = widget.productDetails.colorOptions.firstWhere(
-      (ColorOption color) => color.id == widget.productDetails.selectedColor,
-      orElse: () => widget.productDetails.colorOptions.first,
-    );
-    return _dedupeImages(selectedColor.images);
+    final selectedColorOption = _findSelectedColorOption();
+    return _dedupeImages(selectedColorOption.images);
   }
 
   List<String> _dedupeImages(List<String> images) {
@@ -195,7 +216,7 @@ class _ProductImageGalleryState extends State<ProductImageGallery> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          'Colour: ${_getSelectedColorName()}',
+          '${AppLocalizations.of(context)!.color}: ${_getSelectedColorName(context)}',
           style: AppFonts.getTextStyle(
             fontSize: 16,
             fontWeight: FontWeight.w600,
@@ -210,7 +231,8 @@ class _ProductImageGalleryState extends State<ProductImageGallery> {
             itemCount: widget.productDetails.colorOptions.length,
             itemBuilder: (context, index) {
               final color = widget.productDetails.colorOptions[index];
-              final isSelected = color.id == widget.productDetails.selectedColor;
+              final selectedOption = _findSelectedColorOption();
+              final isSelected = color.id == selectedOption.id;
               
               return GestureDetector(
                 onTap: () async {
@@ -256,7 +278,7 @@ class _ProductImageGalleryState extends State<ProductImageGallery> {
                       
                       // Color name
                       Text(
-                        color.name,
+                        color.displayNameOrName,
                         style: AppFonts.getTextStyle(
                           fontSize: 12,
                           fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
@@ -274,16 +296,11 @@ class _ProductImageGalleryState extends State<ProductImageGallery> {
     );
   }
 
-  String _getSelectedColorName() {
+  String _getSelectedColorName(BuildContext context) {
     if (widget.productDetails.colorOptions.isEmpty) {
-      return 'Default';
+      return AppLocalizations.of(context)!.color;
     }
-    
-    final selectedColor = widget.productDetails.colorOptions.firstWhere(
-      (ColorOption color) => color.id == widget.productDetails.selectedColor,
-      orElse: () => widget.productDetails.colorOptions.first,
-    );
-    return selectedColor.name;
+    return _findSelectedColorOption().displayNameOrName;
   }
 
   void _onColorSelected(String colorId) {

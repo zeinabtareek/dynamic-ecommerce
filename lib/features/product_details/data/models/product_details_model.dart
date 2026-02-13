@@ -286,9 +286,15 @@ class ProductDetailsModel extends ProductDetails {
                 if (isAvailable) break;
               }
               
+              final String? colorDisplayName = 
+                  (localizedName != englishName && localizedName.isNotEmpty && 
+                   (_containsArabic(localizedName) || !_containsArabic(englishName)))
+                  ? localizedName
+                  : null;
               colorValues.add(VariantAttributeValueModel(
                 id: valueId,
-                name: englishName, // Always use English name for variantAttributeOptions
+                name: englishName, // English name for matching/logic
+                displayName: colorDisplayName, // Localized name for display
                 isAvailable: isAvailable,
                 isSelected: false,
               ));
@@ -308,6 +314,7 @@ class ProductDetailsModel extends ProductDetails {
                 colorValues[selectedIdx] = VariantAttributeValueModel(
                   id: firstAvailable.id,
                   name: firstAvailable.name,
+                  displayName: firstAvailable.displayName,
                   isAvailable: firstAvailable.isAvailable,
                   isSelected: true,
                 );
@@ -430,10 +437,16 @@ class ProductDetailsModel extends ProductDetails {
               if (isAvailable) break;
             }
             
-            // Always use English name for variantAttributeOptions (for internal matching)
+            // Store English name for matching, localized name for display (like ColorOption)
+            final String? displayNameForValue = 
+                (localizedName != englishName && localizedName.isNotEmpty && 
+                 (_containsArabic(localizedName) || !_containsArabic(englishName)))
+                ? localizedName
+                : null;
             values.add(VariantAttributeValueModel(
               id: valueId,
-              name: englishName, // Always use English name for matching
+              name: englishName, // English name for matching/logic
+              displayName: displayNameForValue, // Localized name for display (Arabic when locale is Arabic)
               isAvailable: isAvailable,
               isSelected: false,
             ));
@@ -448,6 +461,7 @@ class ProductDetailsModel extends ProductDetails {
             values[0] = VariantAttributeValueModel(
               id: firstValue.id,
               name: firstValue.name,
+              displayName: firstValue.displayName,
               isAvailable: firstValue.isAvailable,
               isSelected: true,
             );
@@ -1080,8 +1094,20 @@ class ProductDetailsModel extends ProductDetails {
       attributeVariantCombinations: attributeVariantCombinations,
       attributeValueCombinationsByKey: attributeValueCombinationsByKey,
       primaryVariantLabel: primaryVariantLabel.isNotEmpty ? primaryVariantLabel : 'Size',
-      inStock: _initialInStock(_initialStockSource(selectedVariant, variantCombinations, json)),
-      selectedVariantQuantityAvailable: _initialQuantityAvailable(_initialStockSource(selectedVariant, variantCombinations, json)),
+      inStock: _initialInStockFromAttributeCombos(
+        attributeVariantCombinations,
+        variantAttributeOptions,
+        selectedVariant,
+        variantCombinations,
+        json,
+      ),
+      selectedVariantQuantityAvailable: _initialQuantityFromAttributeCombos(
+        attributeVariantCombinations,
+        variantAttributeOptions,
+        selectedVariant,
+        variantCombinations,
+        json,
+      ),
       // Parse product tags
       tags: (json['product_tag_ids'] as List<dynamic>? ?? const []).map((tag) {
         final tagMap = tag as Map<String, dynamic>;
@@ -1111,6 +1137,93 @@ class ProductDetailsModel extends ProductDetails {
       return variantCombinations.first as Map<String, dynamic>;
     }
     return null;
+  }
+
+  /// Builds initial selection map (attr slug -> value id) from first/selected value per attribute.
+  /// Same logic as entity's getSelectedAttributeSlugToValueId for initial load (e.g. first color id).
+  static Map<String, int> _initialSelectionByAttrSlugAndValueId(
+    List<VariantAttributeOption> variantAttributeOptions,
+  ) {
+    final map = <String, int>{};
+    String toValueKey(String value) =>
+        value.trim().toLowerCase().replaceAll(' ', '-');
+    for (final opt in variantAttributeOptions) {
+      if (opt.values.isEmpty) continue;
+      VariantAttributeValue? selectedVal;
+      if (opt.selectedValue.isEmpty) {
+        selectedVal = opt.values.first;
+      } else {
+        for (final v in opt.values) {
+          if (toValueKey(v.name) == toValueKey(opt.selectedValue) ||
+              (v.displayName != null &&
+                  v.displayName!.isNotEmpty &&
+                  toValueKey(v.displayName!) == toValueKey(opt.selectedValue))) {
+            selectedVal = v;
+            break;
+          }
+        }
+        selectedVal ??= opt.values.first;
+      }
+      final idInt = int.tryParse(selectedVal.id.toString());
+      if (idInt != null) {
+        map[ProductDetails.attributeNameToComboSlug(opt.attributeName)] = idInt;
+      }
+    }
+    return map;
+  }
+
+  /// Initial in_stock from attribute_value_combinations (same loop as attribute click) when possible.
+  static bool _initialInStockFromAttributeCombos(
+    List<AttributeVariantCombination> attributeVariantCombinations,
+    List<VariantAttributeOption> variantAttributeOptions,
+    Map<String, dynamic>? selectedVariant,
+    List<dynamic> variantCombinations,
+    Map<String, dynamic> json,
+  ) {
+    if (attributeVariantCombinations.isEmpty || variantAttributeOptions.isEmpty) {
+      return _initialInStock(
+          _initialStockSource(selectedVariant, variantCombinations, json));
+    }
+    final selection =
+        _initialSelectionByAttrSlugAndValueId(variantAttributeOptions);
+    if (selection.isEmpty) {
+      return _initialInStock(
+          _initialStockSource(selectedVariant, variantCombinations, json));
+    }
+    final matched = ProductDetails.findMatchingComboByValueIds(
+        attributeVariantCombinations, selection);
+    if (matched != null) {
+      return matched.inStock && matched.quantityAvailable > 0;
+    }
+    return _initialInStock(
+        _initialStockSource(selectedVariant, variantCombinations, json));
+  }
+
+  /// Initial quantity_available from attribute_value_combinations (same loop as attribute click).
+  static int? _initialQuantityFromAttributeCombos(
+    List<AttributeVariantCombination> attributeVariantCombinations,
+    List<VariantAttributeOption> variantAttributeOptions,
+    Map<String, dynamic>? selectedVariant,
+    List<dynamic> variantCombinations,
+    Map<String, dynamic> json,
+  ) {
+    if (attributeVariantCombinations.isEmpty || variantAttributeOptions.isEmpty) {
+      return _initialQuantityAvailable(
+          _initialStockSource(selectedVariant, variantCombinations, json));
+    }
+    final selection =
+        _initialSelectionByAttrSlugAndValueId(variantAttributeOptions);
+    if (selection.isEmpty) {
+      return _initialQuantityAvailable(
+          _initialStockSource(selectedVariant, variantCombinations, json));
+    }
+    final matched = ProductDetails.findMatchingComboByValueIds(
+        attributeVariantCombinations, selection);
+    if (matched != null) {
+      return matched.quantityAvailable.toInt();
+    }
+    return _initialQuantityAvailable(
+        _initialStockSource(selectedVariant, variantCombinations, json));
   }
 
   /// Initial stock from selected/first variant: in_stock && quantity_available > 0.
@@ -1536,6 +1649,7 @@ class VariantAttributeValueModel extends VariantAttributeValue {
   const VariantAttributeValueModel({
     required super.id,
     required super.name,
+    super.displayName,
     required super.isAvailable,
     required super.isSelected,
   });
@@ -1544,6 +1658,7 @@ class VariantAttributeValueModel extends VariantAttributeValue {
     return VariantAttributeValueModel(
       id: json['id'] ?? '',
       name: json['name'] ?? '',
+      displayName: json['displayName'] as String?,
       isAvailable: json['isAvailable'] ?? false,
       isSelected: json['isSelected'] ?? false,
     );
@@ -1553,6 +1668,7 @@ class VariantAttributeValueModel extends VariantAttributeValue {
     return {
       'id': id,
       'name': name,
+      if (displayName != null) 'displayName': displayName,
       'isAvailable': isAvailable,
       'isSelected': isSelected,
     };

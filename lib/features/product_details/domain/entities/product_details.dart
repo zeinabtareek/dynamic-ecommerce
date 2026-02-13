@@ -43,22 +43,28 @@ class AttributeVariantCombination extends Equatable {
 /// Result of resolving a selection against [attributeVariantCombinations].
 /// - [enabledValueIds]: all attribute value ids that are still valid (have stock)
 ///   for the current partial selection.
+/// - [enabledValueSlugs]: normalized value names/slugs (e.g. "printed-cover", "40")
+///   from the same combos; use with id for dual validation so multiple in-stock
+///   attributes are not wrongly disabled when id matching fails.
 /// - [matchedVariant]: the best matching variant (if any) for the current selection.
 /// - [suggestedSelection]: when resolving by clicked value, attr slug -> value slug
 ///   from the best combo's available_combination_values to auto-select in UI.
 class AttributeSelectionResult extends Equatable {
   final Set<int> enabledValueIds;
+  /// Normalized value slugs (value part of "attr-value" from combo) for name-based availability check.
+  final Set<String> enabledValueSlugs;
   final AttributeVariantCombination? matchedVariant;
   final Map<String, String>? suggestedSelection;
 
   const AttributeSelectionResult({
     required this.enabledValueIds,
+    this.enabledValueSlugs = const {},
     required this.matchedVariant,
     this.suggestedSelection,
   });
 
   @override
-  List<Object?> get props => [enabledValueIds, matchedVariant, suggestedSelection];
+  List<Object?> get props => [enabledValueIds, enabledValueSlugs, matchedVariant, suggestedSelection];
 }
 
 class ProductDetails extends Equatable {
@@ -455,11 +461,251 @@ class ProductDetails extends Equatable {
     return true;
   }
 
+  /// Returns true if combo matches selection by value IDs only (language-agnostic).
+  /// For every (attrSlug, valueId) in [selectionByAttrSlugToValueId], combo must have
+  /// a value with that attr and id. Normalize API attr (e.g. "اللون") to slug ("color") so match works.
+  static bool comboMatchesByValueIds(
+    List<AttributeCombinationValue> comboValues,
+    Map<String, int> selectionByAttrSlugToValueId,
+  ) {
+    if (selectionByAttrSlugToValueId.isEmpty) return false;
+    for (final e in selectionByAttrSlugToValueId.entries) {
+      final hasMatch = comboValues.any((cv) {
+        final (attr, _) = _parseComboSlug(cv.value);
+        final comboAttrSlug = _attributeNameToComboSlug(attr);
+        return comboAttrSlug == e.key && cv.id == e.value;
+      });
+      if (!hasMatch) return false;
+    }
+    return true;
+  }
+
+  /// Public helper for building attribute slug from display name (e.g. for initial load in model).
+  static String attributeNameToComboSlug(String attrName) =>
+      _attributeNameToComboSlug(attrName);
+
+  /// Builds current selection as attribute slug -> value id from [variantAttributeOptions].
+  /// Used for ID-only matching so English and Arabic produce the same result.
+  Map<String, int> getSelectedAttributeSlugToValueId() {
+    final map = <String, int>{};
+    for (final opt in variantAttributeOptions) {
+      if (opt.selectedValue.isEmpty) continue;
+      VariantAttributeValue? selectedVal;
+      for (final v in opt.values) {
+        if (v.isSelected) {
+          selectedVal = v;
+          break;
+        }
+        if (_toValueKey(v.name) == _toValueKey(opt.selectedValue) ||
+            (v.displayName != null &&
+                v.displayName!.isNotEmpty &&
+                _toValueKey(v.displayName!) == _toValueKey(opt.selectedValue))) {
+          selectedVal = v;
+          break;
+        }
+      }
+      if (selectedVal == null) continue;
+      final idInt = int.tryParse(selectedVal.id.toString());
+      if (idInt == null) continue;
+      final attrSlug = _attributeNameToComboSlug(opt.attributeName);
+      map[attrSlug] = idInt;
+    }
+    return map;
+  }
+
+  /// Returns true if [combo]'s value ids exactly match [selectionBySlug] (current selection).
+  /// Use after loop returns a combo: validate that the combo is for the full selection, not just the clicked id.
+  static bool comboMatchesFullSelection(
+    AttributeVariantCombination combo,
+    Map<String, int> selectionBySlug,
+  ) {
+    if (selectionBySlug.isEmpty) return false;
+    final selectedIds = selectionBySlug.values.toSet();
+    final comboIds = combo.values.map((v) => v.id).toSet();
+    return selectedIds.length == comboIds.length && selectedIds.containsAll(comboIds);
+  }
+
+  /// Finds the best in-stock combo by looking up only the clicked attribute value id.
+  /// API keys attribute_value_combinations by value id (e.g. "325" for size 38).
+  /// Pass only this id; the loop fetches combos for that key and returns the best match.
+  AttributeVariantCombination? findMatchingComboByClickedValueId(String clickedValueId) {
+    if (clickedValueId.trim().isEmpty) return null;
+    final key = clickedValueId.toString().trim();
+    var combos = attributeValueCombinationsByKey[key];
+    if (combos == null || combos.isEmpty) {
+      final keyNum = int.tryParse(key);
+      if (keyNum != null) combos = attributeValueCombinationsByKey[keyNum.toString()];
+    }
+    combos ??= [];
+    final inStock = combos
+        .where((c) => c.inStock && c.quantityAvailable > 0)
+        .toList();
+    if (inStock.isEmpty) return null;
+    return inStock.reduce((a, b) =>
+        a.quantityAvailable >= b.quantityAvailable ? a : b);
+  }
+
+  /// Finds the best in-stock combo that matches [selectionByAttrSlugToValueId] by value IDs.
+  /// Used for initial load so stock/quantity come from the same loop as attribute clicks.
+  static AttributeVariantCombination? findMatchingComboByValueIds(
+    List<AttributeVariantCombination> combos,
+    Map<String, int> selectionByAttrSlugToValueId,
+  ) {
+    if (combos.isEmpty || selectionByAttrSlugToValueId.isEmpty) return null;
+    final inStock = combos
+        .where((c) => c.inStock && c.quantityAvailable > 0)
+        .toList();
+    if (inStock.isEmpty) return null;
+    final matching = inStock
+        .where((c) => comboMatchesByValueIds(c.values, selectionByAttrSlugToValueId))
+        .toList();
+    if (matching.isEmpty) return null;
+    return matching.reduce((a, b) =>
+        a.quantityAvailable >= b.quantityAvailable ? a : b);
+  }
+
   /// Normalize attribute value to API key (e.g. "PRINTED COVER" -> "printed-cover", "4" -> "4").
   static String _toValueKey(String value) =>
       value.trim().toLowerCase().replaceAll(' ', '-');
 
+  /// Map UI attribute name to combo slug (e.g. "SIZE" -> "size", "اللون" -> "color").
+  static String _attributeNameToComboSlug(String attrName) {
+    final a = attrName.toLowerCase().trim().replaceAll(' ', '-');
+    if (a == 'size' || a.contains('size') || a == 'القياس') return 'size';
+    if (a.contains('color') || a == 'colour' || a == 'اللون') return 'color';
+    if (a.contains('material')) return 'materials';
+    if (a.contains('height') || a.contains('heel')) return 'height';
+    if (a == 'width') return 'width';
+    if (a.contains('measurement')) return 'measurement';
+    return a;
+  }
+
+  /// Returns enabled value ids and slugs for [attributeName] from combos that match
+  /// [selectedByAttribute] for all *other* attributes. So when user selects size 40,
+  /// we get all sizes (40, 38, 36, ...) that exist in combos with current color/material/height,
+  /// so 38 stays available instead of being disabled.
+  /// [selectedByAttributeById]: when names are localized (e.g. Arabic), pass attr slug -> value id
+  /// so combos are matched by id and Arabic works the same as English.
+  ({Set<int> ids, Set<String> slugs}) getEnabledIdsAndSlugsForAttribute(
+    String attributeName,
+    Map<String, String> selectedByAttribute,
+    String primaryVariantLabel, {
+    Map<String, int>? selectedByAttributeById,
+  }) {
+    debugPrint(
+      '🧮 [getEnabledIdsAndSlugsForAttribute] attr="$attributeName", '
+      'selectedByAttribute=$selectedByAttribute, '
+      'selectedByAttributeById=$selectedByAttributeById',
+    );
+    if (attributeVariantCombinations.isEmpty) {
+      debugPrint(
+        '🧮 [getEnabledIdsAndSlugsForAttribute] attr="$attributeName" → NO attributeVariantCombinations',
+      );
+      return (ids: {}, slugs: {});
+    }
+    final inStock = attributeVariantCombinations
+        .where((c) => c.quantityAvailable > 0)
+        .toList();
+    if (inStock.isEmpty) {
+      debugPrint(
+        '🧮 [getEnabledIdsAndSlugsForAttribute] attr="$attributeName" → no in‑stock combos',
+      );
+      return (ids: {}, slugs: {});
+    }
+
+    final targetAttrSlug = _attributeNameToComboSlug(attributeName);
+    // Build selection: prefer id-only (selectedByAttributeById with slug keys) so loop uses only value ids.
+    final Map<String, String> otherSelection = {};
+    final Map<String, int> otherSelectionById = {};
+    if (selectedByAttributeById != null && selectedByAttributeById.isNotEmpty) {
+      for (final e in selectedByAttributeById.entries) {
+        if (e.key == targetAttrSlug) continue;
+        final normKey = e.key == 'size' && primaryVariantLabel.isNotEmpty
+            ? _attributeNameToComboSlug(primaryVariantLabel)
+            : e.key;
+        if (normKey == targetAttrSlug) continue;
+        otherSelectionById[e.key] = e.value;
+      }
+    }
+    if (otherSelectionById.isEmpty) {
+      for (final e in selectedByAttribute.entries) {
+        if (e.value.isEmpty) continue;
+        final keySlug = _attributeNameToComboSlug(e.key);
+        if (keySlug == targetAttrSlug) continue;
+        final normKey = keySlug == 'size' && primaryVariantLabel.isNotEmpty
+            ? _attributeNameToComboSlug(primaryVariantLabel)
+            : keySlug;
+        if (normKey == targetAttrSlug) continue;
+        otherSelection[keySlug] = _toValueKey(e.value);
+        if (selectedByAttributeById != null) {
+          int? id = selectedByAttributeById[keySlug] ?? selectedByAttributeById[e.key];
+          if (id == null) {
+            for (final entry in selectedByAttributeById.entries) {
+              if (_attributeNameToComboSlug(entry.key) == keySlug) {
+                id = entry.value;
+                break;
+              }
+            }
+          }
+          if (id != null) otherSelectionById[keySlug] = id;
+        }
+      }
+    }
+
+    // Match by id OR by name: same behaviour for English (name matches); Arabic uses id when name doesn't.
+    bool comboMatchesOtherSelection(List<AttributeCombinationValue> comboValues) {
+      final allKeys = <String>{...otherSelectionById.keys, ...otherSelection.keys};
+      for (final key in allKeys) {
+        final matchById = otherSelectionById.containsKey(key) &&
+            comboValues.any((cv) {
+              final (attr, valuePart) = _parseComboSlug(cv.value);
+              return attr == key && cv.id == otherSelectionById[key];
+            });
+        final matchByName = otherSelection.containsKey(key) &&
+            comboValues.any((cv) {
+              final (attr, valuePart) = _parseComboSlug(cv.value);
+              return attr == key && _toValueKey(valuePart) == otherSelection[key];
+            });
+        // Accept if either matches so both languages work (English: name; Arabic: id when name differs).
+        if (!matchById && !matchByName) return false;
+      }
+      return true;
+    }
+
+    final matchingCombos = (otherSelection.isEmpty && otherSelectionById.isEmpty)
+        ? inStock
+        : inStock.where((combo) => comboMatchesOtherSelection(combo.values)).toList();
+    debugPrint(
+      '🧮 [getEnabledIdsAndSlugsForAttribute] attr="$attributeName" → '
+      'matchingCombos=${matchingCombos.length} (of ${inStock.length} in‑stock)',
+    );
+    if (matchingCombos.isEmpty) {
+      debugPrint(
+        '🧮 [getEnabledIdsAndSlugsForAttribute] attr="$attributeName" → no matching combos after filter',
+      );
+      return (ids: {}, slugs: {});
+    }
+
+    final Set<int> ids = {};
+    final Set<String> slugs = {};
+    for (final combo in matchingCombos) {
+      for (final v in combo.values) {
+        final (attr, valuePart) = _parseComboSlug(v.value);
+        if (attr != targetAttrSlug) continue;
+        ids.add(v.id);
+        if (valuePart.isNotEmpty) slugs.add(_toValueKey(valuePart));
+      }
+    }
+    debugPrint(
+      '🧮 [getEnabledIdsAndSlugsForAttribute] attr="$attributeName" → '
+      'enabledIds=${ids.toList()}, enabledSlugs=${slugs.toList()}',
+    );
+    return (ids: ids, slugs: slugs);
+  }
+
   /// Resolve selection using ONLY the clicked attribute value name.
+  /// [alternativeLookupKeys]: when the primary key (e.g. Arabic name) is not in the API,
+  /// try these keys (e.g. English name, value id) so Arabic and other locales work.
   /// Flow:
   /// 1. Lookup attribute_value_combinations[clickedValueName] by key.
   /// 2. Filter combos where quantity_available > 0 (stock != 0).
@@ -467,14 +713,16 @@ class ProductDetails extends Equatable {
   /// 4. Pick best combo (highest quantity) for stock badge and suggested selection.
   /// 5. Build suggestedSelection (attr->value) from combo's available_combination_values.
   AttributeSelectionResult resolveSelectionByClickedValue(
-    String clickedAttributeValueName,
-  ) {
+    String clickedAttributeValueName, {
+    List<String>? alternativeLookupKeys,
+  }) {
     if (attributeValueCombinationsByKey.isEmpty) {
       debugPrint(
         '📦 [resolveByClickedValue] attributeValueCombinationsByKey is empty',
       );
       return const AttributeSelectionResult(
         enabledValueIds: {},
+        enabledValueSlugs: {},
         matchedVariant: null,
       );
     }
@@ -487,6 +735,29 @@ class ProductDetails extends Equatable {
     }
     if (candidateCombos == null && !valueKey.contains('.')) {
       candidateCombos = attributeValueCombinationsByKey['$valueKey.0'];
+    }
+    // Fallback only when primary key finds nothing (e.g. Arabic name vs API English keys).
+    // Does not affect flow when primary key works (e.g. English).
+    if ((candidateCombos == null || candidateCombos.isEmpty) &&
+        alternativeLookupKeys != null &&
+        alternativeLookupKeys.isNotEmpty) {
+      for (final alt in alternativeLookupKeys) {
+        if (alt.isEmpty) continue;
+        final altKey = _toValueKey(alt);
+        candidateCombos = attributeValueCombinationsByKey[altKey];
+        if (candidateCombos == null && altKey.contains('.')) {
+          candidateCombos = attributeValueCombinationsByKey[altKey.split('.').first];
+        }
+        if (candidateCombos == null && !altKey.contains('.')) {
+          candidateCombos = attributeValueCombinationsByKey['$altKey.0'];
+        }
+        if (candidateCombos != null && candidateCombos.isNotEmpty) {
+          debugPrint(
+            '📦 [resolveByClickedValue] Used alternative key "$altKey" (from "$alt") for lookup',
+          );
+          break;
+        }
+      }
     }
     candidateCombos ??= [];
 
@@ -506,6 +777,7 @@ class ProductDetails extends Equatable {
       );
       return const AttributeSelectionResult(
         enabledValueIds: {},
+        enabledValueSlugs: {},
         matchedVariant: null,
       );
     }
@@ -514,11 +786,16 @@ class ProductDetails extends Equatable {
     final bestCombo = candidateCombos.reduce((a, b) =>
         a.quantityAvailable >= b.quantityAvailable ? a : b);
 
-    // Enabled ids = union of all ids from available_combination_values (filtered combos)
+    // Enabled ids and value slugs = union from available_combination_values (for dual validation)
     final Set<int> enabledIds = {};
+    final Set<String> enabledSlugs = {};
     for (final combo in candidateCombos) {
       for (final v in combo.values) {
         enabledIds.add(v.id);
+        final (_, valuePart) = _parseComboSlug(v.value);
+        if (valuePart.isNotEmpty) {
+          enabledSlugs.add(_toValueKey(valuePart));
+        }
       }
     }
 
@@ -539,21 +816,25 @@ class ProductDetails extends Equatable {
 
     return AttributeSelectionResult(
       enabledValueIds: enabledIds,
+      enabledValueSlugs: enabledSlugs,
       matchedVariant: bestCombo,
       suggestedSelection: suggestedSelection,
     );
   }
 
   /// Resolve the current selection against [attributeVariantCombinations].
-  /// Uses value names only (no ID matching) to validate against
-  /// available_combination_values and obtain in_stock + quantity_available.
-  /// Prefer [resolveSelectionByClickedValue] when user clicks a single attribute.
+  /// Prefers ID-based matching (same result for English and Arabic); falls back to
+  /// raw value matching when selection-by-ID is empty.
   AttributeSelectionResult resolveSelectionFromAttributeCombinations(
     Set<int> selectedValueIds,
   ) {
     if (attributeVariantCombinations.isEmpty) {
+      debugPrint(
+        '📦 [resolveSelectionFromAttrCombos] NO attributeVariantCombinations; selectedValueIds=$selectedValueIds',
+      );
       return const AttributeSelectionResult(
         enabledValueIds: {},
+        enabledValueSlugs: {},
         matchedVariant: null,
       );
     }
@@ -562,25 +843,49 @@ class ProductDetails extends Equatable {
         .where((c) => c.inStock && c.quantityAvailable > 0)
         .toList();
 
+    debugPrint(
+      '📦 [resolveSelectionFromAttrCombos] selectedValueIds=$selectedValueIds, '
+      'candidateCombos=${candidateCombos.length}',
+    );
+
     if (candidateCombos.isEmpty) {
+      debugPrint(
+        '📦 [resolveSelectionFromAttrCombos] NO in‑stock candidateCombos',
+      );
       return const AttributeSelectionResult(
         enabledValueIds: {},
+        enabledValueSlugs: {},
         matchedVariant: null,
       );
     }
 
-    final selectedRawValues = getSelectedAttributesForRawValueMatching();
+    // Prefer ID-based matching so English and Arabic get the same result.
+    final selectionById = getSelectedAttributeSlugToValueId();
     debugPrint(
-      '📦 [resolveSelection] selectedRawValues=$selectedRawValues, '
-      'candidateCombosCount=${candidateCombos.length}',
+      '📦 [resolveSelectionFromAttrCombos] selectionById (attr slug -> value id)=$selectionById',
     );
 
-    final fullMatchCombos = selectedRawValues.isNotEmpty
+    List<AttributeVariantCombination> fullMatchCombos = selectionById.isNotEmpty
         ? candidateCombos
-            .where((combo) =>
-                _comboMatchesByRawValues(combo.values, selectedRawValues))
+            .where((c) => comboMatchesByValueIds(c.values, selectionById))
             .toList()
         : <AttributeVariantCombination>[];
+
+    // Fallback to name/slug matching when no ID-based selection or no ID match.
+    Map<String, String> selectedRawValues = {};
+    if (fullMatchCombos.isEmpty) {
+      selectedRawValues = getSelectedAttributesForRawValueMatching();
+      debugPrint(
+        '📦 [resolveSelection] fallback selectedRawValues=$selectedRawValues, '
+        'candidateCombosCount=${candidateCombos.length}',
+      );
+      fullMatchCombos = selectedRawValues.isNotEmpty
+          ? candidateCombos
+              .where((combo) =>
+                  _comboMatchesByRawValues(combo.values, selectedRawValues))
+              .toList()
+          : <AttributeVariantCombination>[];
+    }
 
     List<AttributeVariantCombination> compatible = fullMatchCombos.isNotEmpty
         ? fullMatchCombos
@@ -593,19 +898,28 @@ class ProductDetails extends Equatable {
                   });
                 });
               }).toList()
-            : []);
+            : <AttributeVariantCombination>[]);
 
     if (compatible.isEmpty) {
+      debugPrint(
+        '📦 [resolveSelectionFromAttrCombos] NO compatible combos selectionById=$selectionById selectedRawValues=$selectedRawValues',
+      );
       return const AttributeSelectionResult(
         enabledValueIds: {},
+        enabledValueSlugs: {},
         matchedVariant: null,
       );
     }
 
     final Set<int> enabledIds = {};
+    final Set<String> enabledSlugs = {};
     for (final combo in compatible) {
       for (final v in combo.values) {
         enabledIds.add(v.id);
+        final (_, valuePart) = _parseComboSlug(v.value);
+        if (valuePart.isNotEmpty) {
+          enabledSlugs.add(_toValueKey(valuePart));
+        }
       }
     }
 
@@ -614,8 +928,20 @@ class ProductDetails extends Equatable {
         : fullMatchCombos.reduce((a, b) =>
             a.quantityAvailable >= b.quantityAvailable ? a : b);
 
+    if (matched != null) {
+      debugPrint(
+        '📦 [resolveSelectionFromAttrCombos] matched variantId=${matched.variantId}, '
+        'qty=${matched.quantityAvailable}, inStock=${matched.inStock}',
+      );
+    } else {
+      debugPrint(
+        '📦 [resolveSelectionFromAttrCombos] no full‑match combo; enabledIds=${enabledIds.toList()}',
+      );
+    }
+
     return AttributeSelectionResult(
       enabledValueIds: enabledIds,
+      enabledValueSlugs: enabledSlugs,
       matchedVariant: matched,
     );
   }
@@ -723,7 +1049,7 @@ class ProductDetails extends Equatable {
     if (colorName.isEmpty || valueName.isEmpty) return false;
 
     String norm(String s) => s.toLowerCase().trim();
-    final normalizedColor = norm(colorName);
+    final equivalentNames = _equivalentNormalizedColorNames(colorName);
     final normalizedValue = norm(valueName);
 
     // Common attribute names used by the backend for color.
@@ -741,8 +1067,7 @@ class ProductDetails extends Equatable {
     ];
 
     for (final combo in variantCombinations) {
-      // 1) Match color using flexible comparison (handles minor naming
-      // differences like "Black", "BLACK 01", Arabic display, etc.).
+      // 1) Match color (Arabic selectedColor matches variant English via colorOptions).
       String? variantColor;
       for (final attrName in colorAttrNames) {
         final v = combo.getAttributeValue(attrName);
@@ -753,12 +1078,7 @@ class ProductDetails extends Equatable {
       }
       if (variantColor == null || variantColor.isEmpty) continue;
 
-      final nVariantColor = norm(variantColor);
-      final bool colorMatches =
-          nVariantColor == normalizedColor ||
-          nVariantColor.contains(normalizedColor) ||
-          normalizedColor.contains(nVariantColor);
-      if (!colorMatches) continue;
+      if (!_variantColorMatches(variantColor, equivalentNames)) continue;
 
       // 2) Match the target attribute/value pair.
       final String? variantAttrValue =
@@ -779,6 +1099,53 @@ class ProductDetails extends Equatable {
     return false;
   }
 
+  /// All normalized names that count as the same color (e.g. Arabic display + English name).
+  /// So when selectedColor is Arabic, we still match variants that have English color.
+  Set<String> _equivalentNormalizedColorNames(String colorName) {
+    String norm(String s) => s.toLowerCase().trim();
+    final out = <String>{norm(colorName)};
+    for (final c in colorOptions) {
+      if (norm(c.name) == norm(colorName) || norm(c.displayName ?? '') == norm(colorName)) {
+        out.add(norm(c.name));
+        if (c.displayName != null && c.displayName!.isNotEmpty) {
+          out.add(norm(c.displayName!));
+        }
+      }
+    }
+    return out;
+  }
+
+  bool _variantColorMatches(String? variantColor, Set<String> equivalentNames) {
+    if (variantColor == null || variantColor.isEmpty) return false;
+    final n = variantColor.toLowerCase().trim();
+    if (equivalentNames.contains(n)) return true;
+    for (final eq in equivalentNames) {
+      if (n.contains(eq) || eq.contains(n)) return true;
+    }
+    return false;
+  }
+
+  /// Whether [variantColorValue] is considered the same as current [selectedColor].
+  /// Use when matching variants by color in UI (e.g. add-to-cart); works for both
+  /// English and Arabic (equivalent names from [colorOptions]).
+  bool colorValueMatchesSelection(String variantColorValue) {
+    if (selectedColor.isEmpty) return false;
+    return _variantColorMatches(
+      variantColorValue,
+      _equivalentNormalizedColorNames(selectedColor),
+    );
+  }
+
+  /// Whether [variantColorValue] is considered the same as [colorName] (e.g. a color option's
+  /// name or displayName). Use for matching variant to a color option; works for both languages.
+  bool colorValueMatchesColorName(String variantColorValue, String colorName) {
+    if (colorName.isEmpty) return false;
+    return _variantColorMatches(
+      variantColorValue,
+      _equivalentNormalizedColorNames(colorName),
+    );
+  }
+
   /// Returns true when there exists at least one variant in [variantCombinations]
   /// that matches the given [colorName] and is actually available in stock
   /// (`inStock == true` and `quantityAvailable > 0`).
@@ -789,7 +1156,7 @@ class ProductDetails extends Equatable {
     if (colorName.isEmpty) return false;
 
     String norm(String s) => s.toLowerCase().trim();
-    final normalizedColor = norm(colorName);
+    final equivalentNames = _equivalentNormalizedColorNames(colorName);
 
     // Common attribute names used by the backend for color.
     const colorAttrNames = [
@@ -806,8 +1173,7 @@ class ProductDetails extends Equatable {
     ];
 
     for (final combo in variantCombinations) {
-      // Match color using flexible comparison (handles minor naming
-      // differences like "Black", "BLACK 01", Arabic display, etc.).
+      // Match color (Arabic selectedColor matches variant English color via colorOptions).
       String? variantColor;
       for (final attrName in colorAttrNames) {
         final v = combo.getAttributeValue(attrName);
@@ -818,12 +1184,7 @@ class ProductDetails extends Equatable {
       }
       if (variantColor == null || variantColor.isEmpty) continue;
 
-      final nVariantColor = norm(variantColor);
-      final bool colorMatches =
-          nVariantColor == normalizedColor ||
-          nVariantColor.contains(normalizedColor) ||
-          normalizedColor.contains(nVariantColor);
-      if (!colorMatches) continue;
+      if (!_variantColorMatches(variantColor, equivalentNames)) continue;
 
       // Stock rule: only consider variants that are actually available.
       final double qty = combo.quantityAvailable ?? 0;
@@ -855,9 +1216,9 @@ class ProductDetails extends Equatable {
     }
 
     String norm(String s) => s.toLowerCase().trim();
-    final normalizedColor = norm(colorName);
+    final equivalentNames = _equivalentNormalizedColorNames(colorName);
 
-    debugPrint('🔍 getEnabledAttributeValuesForColor: Starting filter for color="$colorName" (normalized="$normalizedColor")');
+    debugPrint('🔍 getEnabledAttributeValuesForColor: Starting filter for color="$colorName"');
     debugPrint('   Total variants to check: ${variantCombinations.length}');
 
     // Common attribute names used by the backend for color.
@@ -884,7 +1245,7 @@ class ProductDetails extends Equatable {
       debugPrint('🔍 Checking Variant #${i + 1}/${variantCombinations.length}');
       debugPrint('   Variant ID: ${combo.variantId}');
       
-      // Match color
+      // Match color (Arabic selectedColor matches variant English via colorOptions).
       String? variantColor;
       for (final attrName in colorAttrNames) {
         final v = combo.getAttributeValue(attrName);
@@ -901,14 +1262,8 @@ class ProductDetails extends Equatable {
 
       debugPrint('   Color found: "$variantColor"');
       
-      final nVariantColor = norm(variantColor);
-      final bool colorMatches =
-          nVariantColor == normalizedColor ||
-          nVariantColor.contains(normalizedColor) ||
-          normalizedColor.contains(nVariantColor);
-      
-      if (!colorMatches) {
-        debugPrint('   ❌ Color mismatch: "$variantColor" (normalized="$nVariantColor") != "$colorName" (normalized="$normalizedColor") - SKIPPING');
+      if (!_variantColorMatches(variantColor, equivalentNames)) {
+        debugPrint('   ❌ Color mismatch: "$variantColor" != "$colorName" (equivalents: $equivalentNames) - SKIPPING');
         continue;
       }
 
@@ -999,8 +1354,7 @@ class ProductDetails extends Equatable {
       return null;
     }
 
-    String norm(String s) => s.toLowerCase().trim();
-    final normalizedColor = norm(colorName);
+    final equivalentNames = _equivalentNormalizedColorNames(colorName);
 
     // Common attribute names used by the backend for color.
     const colorAttrNames = [
@@ -1017,7 +1371,7 @@ class ProductDetails extends Equatable {
     ];
 
     for (final combo in variantCombinations) {
-      // Match color
+      // Match color (Arabic selectedColor matches variant English via colorOptions).
       String? variantColor;
       for (final attrName in colorAttrNames) {
         final v = combo.getAttributeValue(attrName);
@@ -1028,12 +1382,7 @@ class ProductDetails extends Equatable {
       }
       if (variantColor == null || variantColor.isEmpty) continue;
 
-      final nVariantColor = norm(variantColor);
-      final bool colorMatches =
-          nVariantColor == normalizedColor ||
-          nVariantColor.contains(normalizedColor) ||
-          normalizedColor.contains(nVariantColor);
-      if (!colorMatches) continue;
+      if (!_variantColorMatches(variantColor, equivalentNames)) continue;
 
       // Check stock conditions: inStock == true AND quantityAvailable > 0
       final double qty = combo.quantityAvailable ?? 0;
@@ -1350,17 +1699,22 @@ class VariantAttributeOption extends Equatable {
 
 class VariantAttributeValue extends Equatable {
   final String id;
-  final String name;
+  final String name; // English name for matching/logic
+  final String? displayName; // Localized display name (Arabic when locale is Arabic)
   final bool isAvailable;
   final bool isSelected;
 
   const VariantAttributeValue({
     required this.id,
     required this.name,
+    this.displayName,
     required this.isAvailable,
     required this.isSelected,
   });
 
+  /// Get the display name (localized) or fallback to English name
+  String get displayNameOrName => displayName ?? name;
+
   @override
-  List<Object?> get props => [id, name, isAvailable, isSelected];
+  List<Object?> get props => [id, name, displayName, isAvailable, isSelected];
 }

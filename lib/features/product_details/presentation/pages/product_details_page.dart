@@ -243,8 +243,9 @@ class _ProductDetailsPageState extends State<ProductDetailsPage> {
         builder: (context, state) {
           if (state is ProductDetailsLoaded) {
             final pd = state.productDetails;
-            // Use BLoC-computed inStock (from attribute_value_combinations or model).
+            // Use BLoC-computed inStock (from validation: selected ids match available combination ids).
             // Matches badge and bottom sheet; considers full selection (color, size, material, etc.).
+            // If selected ids match available combination → inStock=true; if no match → inStock=false.
             final bool isOutOfStock = !pd.inStock;
 
             return Container(

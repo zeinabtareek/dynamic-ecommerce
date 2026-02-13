@@ -95,22 +95,26 @@ class SelectHeelHeightEvent extends ProductDetailsEvent {
   List<Object?> get props => [productId, heelHeightCm];
 }
 
+/// Filter variants by selecting an attribute value. The loop uses only [attributeValueId].
+/// [attributeName] and [attributeValue] are optional (derived from value id when not provided).
 class FilterVariantsByAttributeEvent extends ProductDetailsEvent {
   final String productId;
+  /// Attribute value id (from VariantAttributeValue.id). This is sent to the loop to get matched data.
+  final String attributeValueId;
+  /// Optional; derived from option containing this value id when empty.
   final String attributeName;
+  /// Optional; derived from value.id when empty (for display/selectedValue).
   final String attributeValue;
-  /// Attribute value id (from VariantAttributeValue.id) for attribute_value_combinations flow.
-  final String? attributeValueId;
 
   const FilterVariantsByAttributeEvent({
     required this.productId,
-    required this.attributeName,
-    required this.attributeValue,
-    this.attributeValueId,
+    required this.attributeValueId,
+    this.attributeName = '',
+    this.attributeValue = '',
   });
 
   @override
-  List<Object?> get props => [productId, attributeName, attributeValue, attributeValueId];
+  List<Object?> get props => [productId, attributeValueId, attributeName, attributeValue];
 }
 
 /// Explicitly select a concrete variant by its `variantId` and update images/UI.

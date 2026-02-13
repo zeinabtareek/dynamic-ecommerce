@@ -179,13 +179,27 @@ class AddToCartBottomSheet extends StatelessWidget {
                               : productDetails;
                           // Compose selected attributes summary
                           final List<String> parts = [];
+                          String norm(String s) => s.toLowerCase().trim();
                           if (pd.variantAttributeOptions.isNotEmpty) {
                             for (final opt in pd.variantAttributeOptions) {
-                              if (opt.selectedValue.isNotEmpty) {
-                                parts.add(
-                                  '${opt.attributeName}: ${opt.selectedValue}',
-                                );
+                              if (opt.selectedValue.isEmpty) continue;
+                              VariantAttributeValue? selectedVal;
+                              for (final v in opt.values) {
+                                if (v.isSelected) {
+                                  selectedVal = v;
+                                  break;
+                                }
+                                if (norm(v.name) == norm(opt.selectedValue)) {
+                                  selectedVal = v;
+                                  break;
+                                }
                               }
+                              final String displayValue = selectedVal != null
+                                  ? selectedVal.name
+                                  : opt.selectedValue;
+                              parts.add(
+                                '${opt.attributeName}: $displayValue',
+                              );
                             }
                           }
                           // Fallback include primary selected size if not covered
@@ -766,15 +780,15 @@ class AddToCartBottomSheet extends StatelessWidget {
                             });
                       }
 
-                      // Use the same quantity we show in the UI (from _getAvailableQuantityForSelection)
-                      // as the source of truth for the Add to Cart button. This keeps button and "(X available)"
-                      // in sync.
+                      // Use BLoC-computed inStock (from validation: selected ids match available combination ids)
+                      // as the primary source of truth for the Add to Cart button.
+                      // This ensures the button reflects the validation result (match = in stock, no match = out of stock).
+                      final bool variantInStock = currentPd.inStock;
                       final int? availableQty =
                           _getAvailableQuantityForSelection(currentPd, cartState);
-                      final bool variantInStock =
-                          availableQty != null && availableQty > 0;
-                      final bool isOutOfStock = !variantInStock;
-                      final bool canAdd = variantInStock && !isAdding;
+                      // Button is enabled only if: inStock=true AND quantity > 0 AND not currently adding
+                      final bool isOutOfStock = !variantInStock || (availableQty != null && availableQty <= 0);
+                      final bool canAdd = variantInStock && (availableQty == null || availableQty > 0) && !isAdding;
 
                       developer.log(
                         '🔘 Button stock check -> availableQty=$availableQty, '
@@ -1044,6 +1058,18 @@ class AddToCartBottomSheet extends StatelessWidget {
     );
   }
 
+  /// Returns true if [colorValue] from a variant matches the product's selected color (locale-agnostic).
+  bool _colorValueMatchesSelection(ProductDetails pd, String colorValue) {
+    final n = colorValue.toLowerCase().trim();
+    if (pd.selectedColor.toLowerCase().trim() == n) return true;
+    for (final c in pd.colorOptions) {
+      if (!c.isSelected) continue;
+      if (c.name.toLowerCase().trim() == n) return true;
+      if (c.displayName != null && c.displayName!.toLowerCase().trim() == n) return true;
+    }
+    return false;
+  }
+
   /// Helper method to find the currently selected variant.
   /// Uses value_name matching (color, size, material, height) so inStock and quantity_available
   /// match the stock badge and BLoC state.
@@ -1126,18 +1152,16 @@ class AddToCartBottomSheet extends StatelessWidget {
           if (!sizeMatch) return false;
         }
         
-        // Must match color if provided
+        // Must match color if provided (locale-agnostic: Arabic/English via entity)
         if (pd.selectedColor.isNotEmpty) {
-          bool colorMatch = false;
-          final colorValue = combo.getAttributeValue('COLOR NAME') ?? 
-                            combo.getAttributeValue('color name') ?? 
-                            combo.getAttributeValue('color') ?? 
-                            combo.getAttributeValue('colour') ?? 
-                            combo.getAttributeValue('اللون');
-          if (colorValue != null && colorValue.toLowerCase().trim() == pd.selectedColor.toLowerCase().trim()) {
-            colorMatch = true;
+          final colorValue = combo.getAttributeValue('COLOR NAME') ??
+              combo.getAttributeValue('color name') ??
+              combo.getAttributeValue('color') ??
+              combo.getAttributeValue('colour') ??
+              combo.getAttributeValue('اللون');
+          if (colorValue == null || !_colorValueMatchesSelection(pd, colorValue)) {
+            return false;
           }
-          if (!colorMatch) return false;
         }
         
         // Try to match other attributes if they exist in the variant (optional)

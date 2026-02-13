@@ -27,12 +27,15 @@ class ProductInfoSection extends StatelessWidget {
     final isDark = theme.brightness == Brightness.dark;
     final primary = colorScheme.primary;
 
-    // Read lightweight loading flag from BLoC so we can show a loader while
-    // variant/attribute combinations are being recomputed (e.g. after a
-    // color or attribute change).
+    // Read latest ProductDetails from BLoC so UI always reflects the most
+    // recent attribute/stock state (not only the initial props).
+    // Also read lightweight loading flag so we can show a loader while
+    // variant/attribute combinations are being recomputed.
     final pdState = context.watch<ProductDetailsBloc>().state;
     final bool isVariantFilterLoading =
         pdState is ProductDetailsLoaded ? pdState.isVariantFilterLoading : false;
+    final ProductDetails currentProductDetails =
+        pdState is ProductDetailsLoaded ? pdState.productDetails : productDetails;
 
     return SliverToBoxAdapter(
       child: Container(
@@ -77,7 +80,7 @@ class ProductInfoSection extends StatelessWidget {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              productDetails.brand,
+                              currentProductDetails.brand,
                               style: AppFonts.getTextStyle(
                                 fontSize: ResponsiveConstants.mdFontSize,
                                 fontWeight: FontWeight.w600,
@@ -86,7 +89,7 @@ class ProductInfoSection extends StatelessWidget {
                             ),
                             SizedBox(height: ResponsiveConstants.xsSpacing),
                             Text(
-                              productDetails.name,
+                              currentProductDetails.name,
                               style: AppFonts.getTextStyle(
                                 fontSize: ResponsiveConstants.lgFontSize,
                                 fontWeight: FontWeight.w700,
@@ -127,7 +130,7 @@ class ProductInfoSection extends StatelessWidget {
                       Flexible(
                         child: Text(
                           currencyProvider.formatPrice(
-                            productDetails.price,
+                            currentProductDetails.price,
                             locale: Localizations.localeOf(context),
                           ),
                           style: AppFonts.getTextStyle(
@@ -137,14 +140,14 @@ class ProductInfoSection extends StatelessWidget {
                           ),
                         ),
                       ),
-                      if (productDetails.originalPrice != null) ...[
+                      if (currentProductDetails.originalPrice != null) ...[
                         SizedBox(width: ResponsiveConstants.smSpacing),
                         Flexible(
                           child: Text(
-                            currencyProvider.formatPrice(
-                              productDetails.originalPrice!,
-                              locale: Localizations.localeOf(context),
-                            ),
+                              currencyProvider.formatPrice(
+                                currentProductDetails.originalPrice!,
+                                locale: Localizations.localeOf(context),
+                              ),
                             style: AppFonts.getTextStyle(
                               fontSize: ResponsiveConstants.mdFontSize,
                               color: Colors.grey.shade600,
@@ -153,10 +156,10 @@ class ProductInfoSection extends StatelessWidget {
                           ),
                         ),
                       ],
-                      if (productDetails.originalPrice != null &&
-                          productDetails.originalPrice! >
-                              productDetails.price &&
-                          (productDetails.discountPercentage ?? 0) > 0) ...[
+                      if (currentProductDetails.originalPrice != null &&
+                          currentProductDetails.originalPrice! >
+                              currentProductDetails.price &&
+                          (currentProductDetails.discountPercentage ?? 0) > 0) ...[
                         SizedBox(width: ResponsiveConstants.smSpacing),
                         Container(
                           padding: EdgeInsets.symmetric(
@@ -171,7 +174,7 @@ class ProductInfoSection extends StatelessWidget {
                             border: Border.all(color: Colors.red.shade200),
                           ),
                           child: Text(
-                            '-${productDetails.discountPercentage}%',
+                            '-${currentProductDetails.discountPercentage}%',
                             style: AppFonts.getTextStyle(
                               fontSize: ResponsiveConstants.smFontSize,
                               fontWeight: FontWeight.w700,
@@ -183,7 +186,7 @@ class ProductInfoSection extends StatelessWidget {
                     ],
                   ),
 
-                  if (productDetails.originalPrice != null) ...[
+                  if (currentProductDetails.originalPrice != null) ...[
                     SizedBox(height: ResponsiveConstants.xsSpacing),
                     Text(
                       AppLocalizations.of(context)!.vatIncluded,
@@ -205,7 +208,7 @@ class ProductInfoSection extends StatelessWidget {
             // and used to filter variants via filterVariantsBySelectedAttributes() function.
             // Example: Selecting SIZE=36, COLOR=BLACK, MATERIALS=Synthetic Leather will filter
             // variant_combinations to find matching variants.
-            if (productDetails.variantAttributeOptions.where((attrOption) {
+            if (currentProductDetails.variantAttributeOptions.where((attrOption) {
               final name = attrOption.attributeName.toLowerCase();
               return name != 'color' && name != 'colour' && name != 'اللون';
             }).isNotEmpty)
@@ -249,7 +252,7 @@ class ProductInfoSection extends StatelessWidget {
                       )
                     : Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
-                        children: productDetails.variantAttributeOptions
+                        children: currentProductDetails.variantAttributeOptions
                             .where((attrOption) {
                               final name =
                                   attrOption.attributeName.toLowerCase();
@@ -262,7 +265,7 @@ class ProductInfoSection extends StatelessWidget {
                               return Padding(
                                 padding: EdgeInsets.only(
                                   bottom: attrOption ==
-                                          productDetails
+                                          currentProductDetails
                                               .variantAttributeOptions
                                               .where((a) {
                                                 final n = a.attributeName
@@ -295,7 +298,7 @@ class ProductInfoSection extends StatelessWidget {
                                       context: context,
                                       values: attrOption.values,
                                       primary: primary,
-                                      productDetails: productDetails,
+                                      productDetails: currentProductDetails,
                                       attributeName: attrOption.attributeName,
                                     ),
                                   ],
@@ -306,7 +309,7 @@ class ProductInfoSection extends StatelessWidget {
                       ),
               ),
 
-            if (productDetails.variantAttributeOptions.where((attrOption) {
+            if (currentProductDetails.variantAttributeOptions.where((attrOption) {
               final name = attrOption.attributeName.toLowerCase();
               return name != 'color' &&
                   name != 'colour' &&
@@ -316,7 +319,7 @@ class ProductInfoSection extends StatelessWidget {
               SizedBox(height: ResponsiveConstants.mdSpacing),
 
             // Color Selection Card (visual swatches)
-            if (productDetails.colorOptions.isNotEmpty) ...[
+            if (currentProductDetails.colorOptions.isNotEmpty) ...[
               Container(
                 margin: EdgeInsets.symmetric(
                   horizontal: ResponsiveConstants.smPadding,
@@ -337,13 +340,14 @@ class ProductInfoSection extends StatelessWidget {
                     ),
                   ],
                 ),
-                child: ColorSelectionSection(productDetails: productDetails),
+                child:
+                    ColorSelectionSection(productDetails: currentProductDetails),
               ),
               SizedBox(height: ResponsiveConstants.mdSpacing),
             ],
 
             // About Product Card
-            if (productDetails.description.isNotEmpty) ...[
+            if (currentProductDetails.description.isNotEmpty) ...[
               Container(
                 margin: EdgeInsets.symmetric(
                   horizontal: ResponsiveConstants.smPadding,
@@ -365,7 +369,7 @@ class ProductInfoSection extends StatelessWidget {
                   ],
                 ),
                 child: AboutProductSection(
-                  description: productDetails.description,
+                  description: currentProductDetails.description,
                 ),
               ),
               SizedBox(height: ResponsiveConstants.mdSpacing),
@@ -555,7 +559,7 @@ class ProductInfoSection extends StatelessWidget {
             ),
 
             // Optional products (horizontal list)
-            if (productDetails.optionalProducts.isNotEmpty) ...[
+            if (currentProductDetails.optionalProducts.isNotEmpty) ...[
               Padding(
                 padding: EdgeInsets.symmetric(
                   horizontal: ResponsiveConstants.smPadding,
@@ -577,12 +581,12 @@ class ProductInfoSection extends StatelessWidget {
                     horizontal: ResponsiveConstants.smPadding,
                   ),
                   scrollDirection: Axis.horizontal,
-                  itemCount: productDetails.optionalProducts.length,
+                  itemCount: currentProductDetails.optionalProducts.length,
                   separatorBuilder: (_, __) => SizedBox(
                     width: ResponsiveConstants.productDetailsGridSpacing,
                   ),
                   itemBuilder: (context, index) {
-                    final rp = productDetails.optionalProducts[index];
+                    final rp = currentProductDetails.optionalProducts[index];
                     final mapped = _mapRelatedToHomeProduct(
                       RelatedProduct(
                         id: rp.id,
@@ -609,7 +613,7 @@ class ProductInfoSection extends StatelessWidget {
             ],
 
             // Accessories (horizontal list)
-            if (productDetails.accessoryProducts.isNotEmpty) ...[
+            if (currentProductDetails.accessoryProducts.isNotEmpty) ...[
               Padding(
                 padding: EdgeInsets.symmetric(
                   horizontal: ResponsiveConstants.smPadding,
@@ -631,12 +635,12 @@ class ProductInfoSection extends StatelessWidget {
                     horizontal: ResponsiveConstants.smPadding,
                   ),
                   scrollDirection: Axis.horizontal,
-                  itemCount: productDetails.accessoryProducts.length,
+                  itemCount: currentProductDetails.accessoryProducts.length,
                   separatorBuilder: (_, __) => SizedBox(
                     width: ResponsiveConstants.productDetailsGridSpacing,
                   ),
                   itemBuilder: (context, index) {
-                    final rp = productDetails.accessoryProducts[index];
+                    final rp = currentProductDetails.accessoryProducts[index];
                     final mapped = _mapRelatedToHomeProduct(
                       RelatedProduct(
                         id: rp.id,
@@ -663,7 +667,7 @@ class ProductInfoSection extends StatelessWidget {
             ],
 
             // Alternatives (horizontal list)
-            if (productDetails.alternativeProducts.isNotEmpty) ...[
+            if (currentProductDetails.alternativeProducts.isNotEmpty) ...[
               Padding(
                 padding: EdgeInsets.symmetric(
                   horizontal: ResponsiveConstants.smPadding,
@@ -685,12 +689,12 @@ class ProductInfoSection extends StatelessWidget {
                     horizontal: ResponsiveConstants.smPadding,
                   ),
                   scrollDirection: Axis.horizontal,
-                  itemCount: productDetails.alternativeProducts.length,
+                  itemCount: currentProductDetails.alternativeProducts.length,
                   separatorBuilder: (_, __) => SizedBox(
                     width: ResponsiveConstants.productDetailsGridSpacing,
                   ),
                   itemBuilder: (context, index) {
-                    final rp = productDetails.alternativeProducts[index];
+                    final rp = currentProductDetails.alternativeProducts[index];
                     final mapped = _mapRelatedToHomeProduct(
                       RelatedProduct(
                         id: rp.id,
@@ -771,7 +775,10 @@ Widget _buildFullWidthAttributeButtons({
       .toSet();
 
   // Auto-select first enabled value if no value is currently selected
-  // This happens when color changes and we need to select from available options
+  // This happens when color changes and we need to select from available options.
+  // NOTE: This is used only to drive the canonical selectedValue in the BLoC,
+  // not to allow multiple selections in the UI; the UI selection is taken from
+  // a single source of truth (currentSelectedForAttr).
   String? valueToAutoSelect;
   final normalizedAttrName = norm(attributeName);
   if (enabledValuesForThisAttribute.isNotEmpty) {
@@ -794,6 +801,11 @@ Widget _buildFullWidthAttributeButtons({
         final valObj = val as VariantAttributeValue;
         if (enabledValuesForThisAttribute.contains(norm(valObj.name))) {
           valueToAutoSelect = valObj.name;
+          debugPrint(
+            '🔴 [ProductInfoSection] valueToAutoSelect CHANGED: attr="$attributeName" '
+            'currentSelectedValue="$currentSelectedValue" NOT in enabled → valueToAutoSelect="$valueToAutoSelect" '
+            '(current selection became unavailable, UI will show different button as selected)',
+          );
           break;
         }
       }
@@ -814,71 +826,62 @@ Widget _buildFullWidthAttributeButtons({
             attrNameLower == productDetails.primaryVariantLabel.toLowerCase() ||
             attrNameLower.contains('size');
 
-        // CRITICAL: Enable only values that are in the enabled set for this color.
-        // The enabled set comes from filtering variants by color + stock conditions.
-        bool effectiveIsAvailable = false;
-        if (productDetails.selectedColor.isNotEmpty &&
-            enabledValuesForThisAttribute.isNotEmpty) {
-          // Check if this value is in the enabled set (normalized comparison)
-          effectiveIsAvailable =
-              enabledValuesForThisAttribute.contains(norm(val.name));
-        } else if (productDetails.selectedColor.isEmpty) {
-          // No color selected - fallback to original availability
-          effectiveIsAvailable = val.isAvailable;
-        }
-        // If color is selected but there are no enabled values at all,
-        // effectiveIsAvailable stays false → all buttons disabled.
+        // Use the same logic as color: BLoC drives availability (selected = fill, available = outline).
+        // Respect isAvailable from BLoC so that after any attribute click we show correct enabled/disabled.
+        final bool effectiveIsAvailable = val.isAvailable;
 
-        // Current selection for this attribute (from BLoC state)
+        // Single source of truth: use option's selectedValue for ALL attributes (including size)
+        // so chips always match the bottom sheet summary (which also uses opt.selectedValue).
         String? currentSelectedForAttr;
-        if (isSizeAttribute && productDetails.selectedSize.isNotEmpty) {
-          currentSelectedForAttr = productDetails.selectedSize;
-        } else {
-          for (final opt in productDetails.variantAttributeOptions) {
-            if (norm(opt.attributeName) == normalizedAttrName &&
-                opt.selectedValue.isNotEmpty) {
-              currentSelectedForAttr = opt.selectedValue;
-              break;
-            }
-          }
+        for (final opt in productDetails.variantAttributeOptions) {
+          if (norm(opt.attributeName) != normalizedAttrName) continue;
+          currentSelectedForAttr = opt.selectedValue.isNotEmpty
+              ? opt.selectedValue
+              : (isSizeAttribute && productDetails.selectedSize.isNotEmpty
+                  ? productDetails.selectedSize
+                  : null);
+          break;
         }
-        final bool isSelectedFromState = currentSelectedForAttr != null &&
-            norm(val.name) == norm(currentSelectedForAttr);
-
-        // Selection rule: Selected value must ALWAYS show selected style (never greyed).
-        bool isSelected = false;
-        
-        if (valueToAutoSelect != null) {
-          final normalizedAutoSelect = norm(valueToAutoSelect!);
-          final normalizedValName = norm(val.name);
-          if (normalizedValName == normalizedAutoSelect &&
-              enabledValuesForThisAttribute.contains(normalizedAutoSelect)) {
-            isSelected = true;
-          }
-        }
-        
-        if (!isSelected) {
-          if (isSizeAttribute) {
-            if (productDetails.selectedSize.isNotEmpty &&
-                norm(val.name) == norm(productDetails.selectedSize)) {
-              isSelected = true;
-            }
-          } else {
-            if (val.isSelected || shouldForceSelectedForSingleOption) {
-              isSelected = true;
-            }
-          }
-        }
-
-        // Selected value from state always shows as selected (fixes Size 40 etc. appearing disabled).
-        if (isSelectedFromState) {
+        bool isSelected;
+        String selectionSource;
+        if (currentSelectedForAttr != null &&
+            (norm(val.name) == norm(currentSelectedForAttr) ||
+                (val.displayName != null &&
+                    val.displayName!.isNotEmpty &&
+                    norm(val.displayName!) == norm(currentSelectedForAttr)))) {
+          // The value that matches the BLoC's selectedValue (by name or displayName for Arabic).
           isSelected = true;
+          selectionSource = 'BLoC_selectedValue';
+        } else if (currentSelectedForAttr == null &&
+            valueToAutoSelect != null &&
+            norm(val.name) == norm(valueToAutoSelect) &&
+            enabledValuesForThisAttribute.contains(norm(valueToAutoSelect))) {
+          // No selection recorded yet for this attribute – use first enabled
+          // as a temporary visual selection.
+          isSelected = true;
+          selectionSource = 'valueToAutoSelect_FALLBACK';
+        } else if (shouldForceSelectedForSingleOption) {
+          // Single-option attributes (non-color) look selected but are not
+          // treated as "multi-select".
+          isSelected = true;
+          selectionSource = 'shouldForceSelectedForSingleOption';
+        } else {
+          // Ignore val.isSelected and any stale flags; UI follows only one
+          // canonical selection per attribute.
+          isSelected = false;
+          selectionSource = 'none';
+        }
+        if (isSelected) {
+          debugPrint(
+            '🔴 [ProductInfoSection] Button SHOWING SELECTED: attr="$attributeName" value="${val.name}" (id=${val.id}) '
+            'source=$selectionSource currentSelectedForAttr="$currentSelectedForAttr" valueToAutoSelect="$valueToAutoSelect"',
+          );
         }
 
         final bool isTapEnabled = !isSelected && effectiveIsAvailable;
 
-        // Never grey out the selected value - it must always show selected (orange) style.
-        final bool showDisabledVisual = !effectiveIsAvailable && !isSelectedFromState;
+        // Same as color: selected = fill, available = outline; never grey out the selected value.
+        final bool showDisabledVisual = !effectiveIsAvailable && !isSelected;
         final bool isEnabledChoice =
             !showDisabledVisual && effectiveIsAvailable == true;
 
@@ -898,13 +901,13 @@ Widget _buildFullWidthAttributeButtons({
                       // Store selected attribute value and filter variants
                       // The selected value is stored in variantAttributeOptions and used to
                       // filter variant_combinations that match all selected attributes.
-                      debugPrint('🎯 Attribute button tapped: $attributeName="${val.name}" (id: ${val.id})');
+                      debugPrint('🎯 Attribute button tapped: $attributeName id=${val.id}');
                       context.read<ProductDetailsBloc>().add(
                         FilterVariantsByAttributeEvent(
                           productId: productDetails.id,
+                          attributeValueId: val.id,
                           attributeName: attributeName,
                           attributeValue: val.name,
-                          attributeValueId: val.id,
                         ),
                       );
                     }
@@ -944,7 +947,7 @@ Widget _buildFullWidthAttributeButtons({
                 ),
               ),
               child: Text(
-                val.name,
+                val.displayNameOrName,
                 style: AppFonts.getTextStyle(
                   fontSize: ResponsiveConstants.mdFontSize,
                   fontWeight: FontWeight.w600,
