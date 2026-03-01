@@ -6,6 +6,7 @@ import '../domain/repositories/product_details_repository.dart';
 import 'package:zalando_clone_app/core/network/api_client.dart';
 import '../domain/usecases/add_to_cart.dart';
 import '../domain/usecases/get_product_details.dart';
+import '../domain/usecases/get_variant_lite.dart';
 import '../domain/usecases/select_color.dart';
 import '../domain/usecases/select_size.dart';
 import '../domain/usecases/toggle_favorite.dart';
@@ -30,6 +31,7 @@ class ProductDetailsDI {
 
     // Use Cases
     getIt.registerLazySingleton(() => GetProductDetails(getIt()));
+    getIt.registerLazySingleton(() => GetVariantLite(getIt()));
     getIt.registerLazySingleton(() => ToggleFavorite(getIt()));
     getIt.registerLazySingleton(() => SelectColor(getIt()));
     getIt.registerLazySingleton(() => SelectSize(getIt()));
@@ -44,6 +46,7 @@ class ProductDetailsDI {
         
         return ProductDetailsBloc(
           getProductDetails: getIt(),
+          getVariantLite: getIt(),
           toggleFavorite: getIt(),
           selectColor: getIt(),
           selectSize: getIt(),

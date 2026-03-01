@@ -30,7 +30,8 @@ class Endpoints {
   static const String getProduct = '/ecom/get/product';
   static const String getProductCategory = '/ecom/get/product-category';
   static const String productWishList = '/ecom/product/wish-list';
-  
+  static const String productLite = '/ecom/get/variant/lite'; //fetch variants data based on selected attribute ids
+
   // Search APIs
   static const String searchProducts = '/ecom/get/product/filter-search';
   

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:provider/provider.dart';
+import '../bloc/product_details_bloc.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shimmer/shimmer.dart';
@@ -16,10 +17,12 @@ import '../../../../l10n/app_localizations.dart';
 
 class ColorSelectionWidget extends StatelessWidget {
   final ProductDetails productDetails;
+  final VoidCallback? onAfterAttributeSelected;
 
   const ColorSelectionWidget({
     super.key,
     required this.productDetails,
+    this.onAfterAttributeSelected,
   });
 
   @override
@@ -29,13 +32,13 @@ class ColorSelectionWidget extends StatelessWidget {
       left: ResponsiveConstants.mdSpacing,
       right: ResponsiveConstants.mdSpacing,
       child: productDetails.colorOptions.isEmpty
-          ? _ColorSelectionSkeleton(colorScheme: Theme.of(context).colorScheme)
+          ? ColorSelectionSkeleton(colorScheme: Theme.of(context).colorScheme)
           : Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 _buildColorLabel(context),
                 SizedBox(height: ResponsiveConstants.smSpacing),
-                _buildColorThumbnails(context),
+                _buildColorThumbnails(context, onAfterAttributeSelected),
               ],
             ),
     );
@@ -62,12 +65,12 @@ class ColorSelectionWidget extends StatelessWidget {
           }
         }
         
-        // Get selected value_id from controller
+        // Get selected value_id from controller (from second API / full variant data)
         final selectedColorValueId = colorAttributeId != null 
             ? variantController.selectedAttributes[colorAttributeId] 
             : null;
         
-        // Find the ColorOption that matches the selected value_id
+        // Find the ColorOption that matches the selected value_id, or from model's isSelected (first API selected_variant)
         ColorOption? selectedOpt;
         if (selectedColorValueId != null) {
           selectedOpt = productDetails.colorOptions.firstWhere(
@@ -75,10 +78,11 @@ class ColorSelectionWidget extends StatelessWidget {
             orElse: () => productDetails.colorOptions.first,
           );
         } else {
-          // Fallback to first color if no selection
-          selectedOpt = productDetails.colorOptions.isNotEmpty 
-              ? productDetails.colorOptions.first 
-              : null;
+          // Fallback: use model's isSelected (set from selected_variant in first API response)
+          final withSelected = productDetails.colorOptions.where((c) => c.isSelected).toList();
+          selectedOpt = withSelected.isNotEmpty
+              ? withSelected.first
+              : (productDetails.colorOptions.isNotEmpty ? productDetails.colorOptions.first : null);
         }
         
         if (selectedOpt == null) {
@@ -115,12 +119,12 @@ class ColorSelectionWidget extends StatelessWidget {
     );
   }
 
-  Widget _buildColorThumbnails(BuildContext context) {
+  Widget _buildColorThumbnails(BuildContext context, VoidCallback? onAfterAttributeSelected) {
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
       child: Row(
         children: productDetails.colorOptions.map((color) {
-          return _buildColorThumbnail(context, color);
+          return _buildColorThumbnail(context, color, onAfterAttributeSelected);
         }).toList(),
       ),
     );
@@ -193,7 +197,7 @@ class ColorSelectionWidget extends StatelessWidget {
     return ImageCacheUtils.normalizeImageUrl(path);
   }
 
-  Widget _buildColorThumbnail(BuildContext context, ColorOption color) {
+  Widget _buildColorThumbnail(BuildContext context, ColorOption color, VoidCallback? onAfterAttributeSelected) {
     return Consumer<DynamicVariantController>(
       builder: (context, variantController, _) {
         // Prefer a variant-based image (grouped by variantId), then color-level images, then product-level images.
@@ -228,13 +232,15 @@ class ColorSelectionWidget extends StatelessWidget {
         // Get value_id from colorOption.id
         final colorValueId = int.tryParse(color.id);
         
-        // Get selected value_id for color attribute from controller
+        // Get selected value_id for color attribute from controller (second API)
         final selectedColorValueId = colorAttributeId != null 
             ? variantController.selectedAttributes[colorAttributeId] 
             : null;
         
-        // Check if this color is selected using controller state
-        final isSelected = selectedColorValueId == colorValueId;
+        // Check if this color is selected: controller state, or model's isSelected (first API selected_variant)
+        final isSelected = selectedColorValueId != null
+            ? selectedColorValueId == colorValueId
+            : color.isSelected;
         
         debugPrint('🎨 ColorSelectionWidget (Top): Color "${color.displayNameOrName}" (value_id: $colorValueId)');
         debugPrint('   Selected value_id: $selectedColorValueId, isSelected: $isSelected');
@@ -247,12 +253,14 @@ class ColorSelectionWidget extends StatelessWidget {
               ? () async {
                   debugPrint('🎨 ColorSelectionWidget (Top): Tapped color "${color.displayNameOrName}" (value_id: $colorValueId, attribute_id: $colorAttributeId)');
                   await HapticService.buttonClick();
-                  // Use DynamicVariantController as single source of truth
-                  // This immediately updates selection and triggers Consumer rebuilds
+                  // Sync with latest product details and variant_combinations from normal API
+                  final state = context.read<ProductDetailsBloc>().state;
+                  if (state is ProductDetailsLoaded) {
+                    variantController.updateProductDetails(state.productDetails);
+                    variantController.setVariantCombinationsForMatching(state.variantCombinationsFromNormalApi);
+                  }
                   variantController.selectAttributeValue(colorAttributeId!, colorValueId!);
-                  
-                  // Note: BLoC event removed to prevent double-click issue
-                  // Controller handles selection, images update via controller.currentImages
+                  onAfterAttributeSelected?.call();
                 }
           : null,
           child: Container(
@@ -325,10 +333,10 @@ class ColorSelectionWidget extends StatelessWidget {
 
 /// Skeleton for the color selection overlay when no color data is available.
 /// Matches the layout of the real widget (label + horizontal thumbnails).
-class _ColorSelectionSkeleton extends StatelessWidget {
+class ColorSelectionSkeleton extends StatelessWidget {
   final ColorScheme colorScheme;
 
-  const _ColorSelectionSkeleton({required this.colorScheme});
+  const ColorSelectionSkeleton({required this.colorScheme});
 
   @override
   Widget build(BuildContext context) {

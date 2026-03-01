@@ -16,11 +16,13 @@ import '../../../../core/services/haptic_service.dart';
 class ColorSelectionSection extends StatelessWidget {
   final ProductDetails productDetails;
   final ScrollController? scrollController;
+  final VoidCallback? onAfterAttributeSelected;
 
   const ColorSelectionSection({
     super.key,
     required this.productDetails,
     this.scrollController,
+    this.onAfterAttributeSelected,
   });
 
   @override
@@ -87,6 +89,7 @@ class ColorSelectionSection extends StatelessWidget {
                 return _ColorListWithIndicators(
                   productDetails: currentProductDetails,
                   pageScrollController: scrollController,
+                  onAfterAttributeSelected: onAfterAttributeSelected,
                 );
               },
             );
@@ -102,10 +105,12 @@ class ColorSelectionSection extends StatelessWidget {
 class _ColorListWithIndicators extends StatefulWidget {
   final ProductDetails productDetails;
   final ScrollController? pageScrollController;
+  final VoidCallback? onAfterAttributeSelected;
 
   const _ColorListWithIndicators({
     required this.productDetails,
     this.pageScrollController,
+    this.onAfterAttributeSelected,
   });
 
   @override
@@ -169,7 +174,15 @@ class _ColorListWithIndicatorsState extends State<_ColorListWithIndicators> {
     final colorAtIndex = colorOptions[index];
     final valueIdAtIndex = int.tryParse(colorAtIndex.id);
     if (valueIdAtIndex != null && valueIdAtIndex != selectedValueId) {
+      if (mounted) {
+        final state = context.read<ProductDetailsBloc>().state;
+        if (state is ProductDetailsLoaded) {
+          _variantController!.updateProductDetails(state.productDetails);
+          _variantController!.setVariantCombinationsForMatching(state.variantCombinationsFromNormalApi);
+        }
+      }
       _variantController!.selectAttributeValue(colorAttributeId, valueIdAtIndex);
+      widget.onAfterAttributeSelected?.call();
     }
   }
 
@@ -339,6 +352,7 @@ class _ColorListWithIndicatorsState extends State<_ColorListWithIndicators> {
                         productDetails: widget.productDetails,
                         scrollController: widget.pageScrollController,
                         itemIndex: index,
+                        onAfterAttributeSelected: widget.onAfterAttributeSelected,
                         onSelected: (int selectedIndex) {
                           if (!_hasUserInteractedWithColorList) {
                             setState(() => _hasUserInteractedWithColorList = true);
@@ -440,6 +454,7 @@ class _ColorOptionCard extends StatelessWidget {
   final ProductDetails productDetails;
   final ScrollController? scrollController;
   final int itemIndex;
+  final VoidCallback? onAfterAttributeSelected;
   final void Function(int index)? onSelected;
 
   const _ColorOptionCard({
@@ -447,6 +462,7 @@ class _ColorOptionCard extends StatelessWidget {
     required this.productDetails,
     this.scrollController,
     required this.itemIndex,
+    this.onAfterAttributeSelected,
     this.onSelected,
   });
 
@@ -860,7 +876,10 @@ class _ColorOptionCard extends StatelessWidget {
         // Only values that truly do not exist in any in-stock variant are disabled.
         final bool isAvailable = valueState != ValueState.doesNotExist;
         final bool isDisabled = !isAvailable;
-        final bool isSelected = selectedColorValueId == colorValueId;
+        // Use controller selection when present; otherwise use model's isSelected (from selected_variant in first API)
+        final bool isSelected = selectedColorValueId != null
+            ? selectedColorValueId == colorValueId
+            : colorOption.isSelected;
         final imageUrl = _getColorImageUrl();
         
         debugPrint('🎨 ColorSelection: "${colorOption.displayNameOrName}" (value_id: $colorValueId)');
@@ -880,8 +899,14 @@ class _ColorOptionCard extends StatelessWidget {
               ? () async {
                   debugPrint('🎨 ColorSelectionSection (Bottom): Tapped color "${colorOption.displayNameOrName}" (value_id: $colorValueId, attribute_id: $colorAttributeId)');
                   await HapticService.buttonClick();
-                  // Update controller (single source of truth)
+                  // Sync with latest product details and variant_combinations from normal API
+                  final state = context.read<ProductDetailsBloc>().state;
+                  if (state is ProductDetailsLoaded) {
+                    variantController.updateProductDetails(state.productDetails);
+                    variantController.setVariantCombinationsForMatching(state.variantCombinationsFromNormalApi);
+                  }
                   variantController.selectAttributeValue(colorAttributeId!, colorValueId!);
+                  onAfterAttributeSelected?.call();
                   // Update indicator and scroll list to bring selected color into view
                   onSelected?.call(itemIndex);
 

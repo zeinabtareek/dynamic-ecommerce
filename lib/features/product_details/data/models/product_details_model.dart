@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import '../../domain/entities/product_details.dart';
 import '../../../../../core/constants/app_constants.dart';
 import '../../../../../core/utils/image_cache_utils.dart';
@@ -189,7 +190,10 @@ class ProductDetailsModel extends ProductDetails {
       print('🔍 ProductDetailsModel [variant_attributes section]: Built colorIdToEnglishName with ${colorIdToEnglishName.length} entries');
       print('🔍 ProductDetailsModel [variant_attributes section]: Built colorNameToEnglishName with ${colorNameToEnglishName.length} entries');
       
-      if (variantCombinations.isNotEmpty && variantAttributes.isNotEmpty) {
+      // Use variant_attributes whenever present so all attribute values (e.g. all sizes) are shown.
+      // When variant_combinations is empty (e.g. lite API), use attribute_value_combinations for availability.
+      if (variantAttributes.isNotEmpty) {
+        final avc = _parseAttributeValueCombinations(json);
         // Process each variant attribute
         for (final attr in variantAttributes) {
           final attrName = (attr['name'] ?? '').toString();
@@ -263,28 +267,32 @@ class ProductDetailsModel extends ProductDetails {
                 print('✅ ProductDetailsModel: Found English name "$englishName" for color ID $valueId (localized: $localizedName)');
               }
               
-              // Check availability
+              // Check availability: variant_combinations when present, else attribute_value_combinations
               bool isAvailable = false;
-              for (final variant in variantCombinations) {
-                final attrs = (variant['attributes'] as List<dynamic>? ?? const []);
-                for (final a in attrs) {
-                  if (a is Map) {
-                    final variantAttrName = (a['attribute_name'] ?? '').toString();
-                    final variantValueId = (a['value_id'] ?? '').toString();
-                    final variantValueName = (a['value_name'] ?? '').toString();
-                    if ((variantAttrName.toLowerCase() == 'color name' || 
-                         variantAttrName.toLowerCase() == 'color' || 
-                         variantAttrName.toLowerCase() == 'colour' || 
-                         variantAttrName.toLowerCase() == 'اللون') &&
-                        (variantValueId == valueId || 
-                         variantValueName.toLowerCase() == englishName.toLowerCase() ||
-                         variantValueName.toLowerCase() == localizedName.toLowerCase())) {
-                      isAvailable = (variant['in_stock'] ?? false) as bool;
-                      break;
+              if (variantCombinations.isNotEmpty) {
+                for (final variant in variantCombinations) {
+                  final attrs = (variant['attributes'] as List<dynamic>? ?? const []);
+                  for (final a in attrs) {
+                    if (a is Map) {
+                      final variantAttrName = (a['attribute_name'] ?? '').toString();
+                      final variantValueId = (a['value_id'] ?? '').toString();
+                      final variantValueName = (a['value_name'] ?? '').toString();
+                      if ((variantAttrName.toLowerCase() == 'color name' ||
+                           variantAttrName.toLowerCase() == 'color' ||
+                           variantAttrName.toLowerCase() == 'colour' ||
+                           variantAttrName.toLowerCase() == 'اللون') &&
+                          (variantValueId == valueId ||
+                           variantValueName.toLowerCase() == englishName.toLowerCase() ||
+                           variantValueName.toLowerCase() == localizedName.toLowerCase())) {
+                        isAvailable = (variant['in_stock'] ?? false) as bool;
+                        break;
+                      }
                     }
                   }
+                  if (isAvailable) break;
                 }
-                if (isAvailable) break;
+              } else {
+                isAvailable = avc.isEmpty || avc.containsKey(valueId);
               }
               
               // Ensure we never add a color value with empty name (causes "value="" disabled in BLoC)
@@ -344,32 +352,36 @@ class ProductDetailsModel extends ProductDetails {
             // Canonical name from API: always use the name from variant_attributes
             final String canonicalName = localizedName;
 
-            // Stock validation: cross-reference variant_combinations; only in_stock variants count
+            // Availability: variant_combinations when present, else attribute_value_combinations
             bool isAvailable = false;
-            for (final variant in variantCombinations) {
-              if (variant is! Map) continue;
-              final inStock = (variant['in_stock'] ?? false) as bool;
-              if (!inStock) continue;
-              final attrs = (variant['attributes'] as List<dynamic>? ?? const []);
-              for (final a in attrs) {
-                if (a is Map) {
-                  final variantAttrName = (a['attribute_name'] ?? '').toString();
-                  final variantValueId = (a['value_id'] ?? '').toString();
-                  final variantValueName = (a['value_name'] ?? '').toString().trim();
-                  final attrNameLower = attrName.toLowerCase();
-                  final variantAttrNameLower = variantAttrName.toLowerCase();
-                  final isMatchingAttribute = variantAttrNameLower == attrNameLower ||
-                                            variantAttrNameLower.contains(attrNameLower) ||
-                                            attrNameLower.contains(variantAttrNameLower);
-                  final valueMatch = variantValueId == valueId ||
-                      variantValueName.toLowerCase() == canonicalName.toLowerCase();
-                  if (isMatchingAttribute && valueMatch) {
-                    isAvailable = true;
-                    break;
+            if (variantCombinations.isNotEmpty) {
+              for (final variant in variantCombinations) {
+                if (variant is! Map) continue;
+                final inStock = (variant['in_stock'] ?? false) as bool;
+                if (!inStock) continue;
+                final attrs = (variant['attributes'] as List<dynamic>? ?? const []);
+                for (final a in attrs) {
+                  if (a is Map) {
+                    final variantAttrName = (a['attribute_name'] ?? '').toString();
+                    final variantValueId = (a['value_id'] ?? '').toString();
+                    final variantValueName = (a['value_name'] ?? '').toString().trim();
+                    final attrNameLower = attrName.toLowerCase();
+                    final variantAttrNameLower = variantAttrName.toLowerCase();
+                    final isMatchingAttribute = variantAttrNameLower == attrNameLower ||
+                                              variantAttrNameLower.contains(attrNameLower) ||
+                                              attrNameLower.contains(variantAttrNameLower);
+                    final valueMatch = variantValueId == valueId ||
+                        variantValueName.toLowerCase() == canonicalName.toLowerCase();
+                    if (isMatchingAttribute && valueMatch) {
+                      isAvailable = true;
+                      break;
+                    }
                   }
                 }
+                if (isAvailable) break;
               }
-              if (isAvailable) break;
+            } else {
+              isAvailable = avc.isEmpty || avc.containsKey(valueId);
             }
 
             values.add(VariantAttributeValueModel(
@@ -430,25 +442,102 @@ class ProductDetailsModel extends ProductDetails {
         }
       }
 
+    // When lite API omits variant_attributes, build non-color attribute options from
+    // selected_variant + variant_combinations so the full list of values is shown (not only selected).
+    final hasNonColorOptions = variantAttributeOptions.any((o) => !_isColorAttributeName(o.attributeName));
+    if (!hasNonColorOptions) {
+      final selVariant = json['selected_variant'] as Map<String, dynamic>?;
+      if (selVariant != null) {
+        // Collect all unique (value_id, value_name) per attribute from variant_combinations
+        // so we can show the full list of options, not just the selected value.
+        final combos = _normalizeVariantCombinations(json['variant_combinations']);
+        final Map<String, List<({String id, String name})>> valuesByAttrId = {};
+        for (final v in combos) {
+          if (v is! Map) continue;
+          final attrs = (v['attributes'] as List<dynamic>?) ?? [];
+          for (final a in attrs) {
+            if (a is! Map) continue;
+            final attrId = (a['attribute_id'] ?? '').toString();
+            final attrName = (a['attribute_name'] ?? '').toString().toLowerCase();
+            if (attrId.isEmpty) continue;
+            if (attrName == 'color' || attrName == 'colour' ||
+                attrName == 'اللون' || attrName == 'color name') continue;
+            final valueId = (a['value_id'] ?? '').toString();
+            final valueName = (a['value_name'] ?? '').toString().trim();
+            if (valueId.isEmpty && valueName.isEmpty) continue;
+            valuesByAttrId.putIfAbsent(attrId, () => []);
+            final list = valuesByAttrId[attrId]!;
+            if (!list.any((e) => e.id == valueId || e.name == valueName)) {
+              list.add((id: valueId, name: valueName));
+            }
+          }
+        }
+
+        final selAttrs = (selVariant['attributes'] as List<dynamic>?) ?? [];
+        for (final sa in selAttrs) {
+          if (sa is! Map) continue;
+          final attrName = (sa['attribute_name'] ?? '').toString().trim();
+          final valueName = (sa['value_name'] ?? '').toString().trim();
+          final valueId = (sa['value_id'] ?? '').toString();
+          final attrId = (sa['attribute_id'] ?? '').toString();
+          if (attrName.isEmpty) continue;
+          final attrNameLower = attrName.toLowerCase();
+          if (attrNameLower == 'color' || attrNameLower == 'colour' ||
+              attrNameLower == 'اللون' || attrNameLower == 'color name') continue;
+          String englishAttrName = attrName;
+          if (attrNameLower.contains('size') || attrNameLower == 'القياس') {
+            englishAttrName = 'SIZE';
+          } else if (attrNameLower.contains('material')) {
+            englishAttrName = 'MATERIAL NAME';
+          } else if (attrNameLower.contains('height') || attrNameLower.contains('heel')) {
+            englishAttrName = 'HEIGHT';
+          }
+
+          // Use all values from variant_combinations for this attribute when available
+          final allValues = valuesByAttrId[attrId] ?? <({String id, String name})>[];
+          final List<VariantAttributeValueModel> valueModels = allValues.isNotEmpty
+              ? allValues.map((e) {
+                  final isSelected = e.id == valueId || e.name == valueName;
+                  return VariantAttributeValueModel(
+                    id: e.id,
+                    name: e.name,
+                    isAvailable: true,
+                    isSelected: isSelected,
+                  );
+                }).toList()
+              : [
+                  VariantAttributeValueModel(
+                    id: valueId,
+                    name: valueName,
+                    isAvailable: true,
+                    isSelected: true,
+                  ),
+                ];
+
+          variantAttributeOptions.add(VariantAttributeOptionModel(
+            attributeName: englishAttrName,
+            apiAttributeName: attrName,
+            attributeId: attrId.isEmpty ? null : attrId,
+            values: valueModels,
+            selectedValue: valueName,
+          ));
+        }
+        if (variantAttributeOptions.isNotEmpty) {
+          debugPrint(
+            '📋 ProductDetailsModel: Built ${variantAttributeOptions.length} attribute option(s) from selected_variant + variant_combinations (lite fallback)',
+          );
+        }
+      }
+    }
+
     // Preselect attribute values from an initial variant:
     // 1) Prefer explicit selected_variant from the API when present.
-    // 2) Otherwise, fall back to this_variant_attributes (new API shape).
-    // 3) Finally, fall back to the first entry in variant_combinations.
+    // 2) Otherwise, fall back to the first entry in variant_combinations.
     // This ensures that, on first load, the UI reflects a real variant
     // combination instead of arbitrary "first available" values per attribute.
     double? selectedHeelHeightFromVariant;
     Map<String, dynamic>? initialVariant =
         json['selected_variant'] as Map<String, dynamic>?;
-
-    // New API: this_variant_attributes is a flat list of attributes for the
-    // currently selected variant. Wrap it into a pseudo-variant structure
-    // compatible with the old path so the rest of the logic continues to work.
-    if (initialVariant == null && json['this_variant_attributes'] is List) {
-      final attrs = (json['this_variant_attributes'] as List<dynamic>?) ?? const [];
-      initialVariant = {
-        'attributes': attrs,
-      };
-    }
 
     if (initialVariant == null) {
       final List<dynamic> combos =
@@ -460,6 +549,7 @@ class ProductDetailsModel extends ProductDetails {
 
     // Preselect only values that exist in variant_attributes (no ghost values)
     if (initialVariant != null) {
+      debugPrint('📥 [Step 2 - Model] selected_variant from API: $initialVariant');
       final List<dynamic> selAttrs =
           (initialVariant['attributes'] as List<dynamic>?) ?? const [];
       if (selAttrs.isNotEmpty && variantAttributeOptions.isNotEmpty) {
@@ -468,6 +558,10 @@ class ProductDetailsModel extends ProductDetails {
           final String attrName = (sa['attribute_name'] ?? '').toString();
           final String valueName = (sa['value_name'] ?? '').toString().trim();
           final String valueIdFromVariant = (sa['value_id'] ?? '').toString();
+          debugPrint(
+            '   → [Step 2 - Model] selected_variant attr: "$attrName" '
+            '(value_id=$valueIdFromVariant, value_name="$valueName")',
+          );
 
           // Capture numeric heel height when available
           if (attrName.toLowerCase() == 'height' ||
@@ -486,6 +580,13 @@ class ProductDetailsModel extends ProductDetails {
                 (o.apiAttributeName?.toLowerCase() ==
                     attrName.toLowerCase()),
           );
+          if (optIdx < 0) {
+            debugPrint(
+              '⚠️ [Step 2 - Model] No matching option for selected_variant attr "$attrName" '
+              '(value_id=$valueIdFromVariant value_name="$valueName"). '
+              'Available options: ${variantAttributeOptions.map((o) => '"${o.attributeName}" api="${o.apiAttributeName ?? ""}"').toList()}',
+            );
+          }
           if (optIdx >= 0) {
             final opt = variantAttributeOptions[optIdx];
             // Only use a selection that exists in this attribute's values (by id or name)
@@ -497,7 +598,18 @@ class ProductDetailsModel extends ProductDetails {
                 break;
               }
             }
-            if (selectedValueToApply == null) continue;
+            if (selectedValueToApply == null) {
+              debugPrint(
+                '⚠️ [Step 2 - Model] Could not match value for "$attrName": '
+                'value_id=$valueIdFromVariant value_name="$valueName" '
+                '(option values: ${opt.values.map((v) => '${v.id}:${v.name}').toList()})',
+              );
+              continue;
+            }
+            debugPrint(
+              '   → [Step 2 - Model] Applying to option "${opt.attributeName}": '
+              'selectedValue="$selectedValueToApply" (before: "${opt.selectedValue}")',
+            );
             final updatedValues = opt.values.map((v) {
               return VariantAttributeValueModel(
                 id: v.id,
@@ -514,6 +626,13 @@ class ProductDetailsModel extends ProductDetails {
               attributeId: opt.attributeId,
             );
           }
+        }
+        // Log final selectedValue per attribute option
+        for (final opt in variantAttributeOptions) {
+          debugPrint(
+            '✅ [Step 2 - Model] Final initial selection → '
+            '"${opt.attributeName}" selectedValue="${opt.selectedValue}"',
+          );
         }
       }
     }
@@ -745,13 +864,20 @@ class ProductDetailsModel extends ProductDetails {
           }
         }
         
+        // Match selected_variant color using normalized comparison (e.g. "BLACK 01" vs "Black")
+        final sel = selectedColorName != null ? _norm(selectedColorName) : '';
+        final locNorm = _norm(localizedName);
+        final engNorm = englishName.isNotEmpty ? _norm(englishName) : '';
+        final isSelectedColor = sel.isNotEmpty && (locNorm == sel || engNorm == sel ||
+            sel.startsWith(locNorm) || (engNorm.isNotEmpty && sel.startsWith(engNorm)) ||
+            locNorm.startsWith(sel) || (engNorm.isNotEmpty && engNorm.startsWith(sel)));
         final colorOption = ColorOptionModel(
           id: colorId,
           name: nameForData, // English name for data/logic
           displayName: displayName, // Arabic name for display (if different)
           code: '#000000',
           images: imagesForColor,
-          isSelected: selectedColorName != null ? (localizedName == selectedColorName || englishName == selectedColorName) : false,
+          isSelected: isSelectedColor,
         );
         print('🎨 Final ColorOption: id="${colorOption.id}", name="${colorOption.name}", displayName="${colorOption.displayName}", images=${colorOption.images.length}');
         return colorOption;
@@ -832,13 +958,19 @@ class ProductDetailsModel extends ProductDetails {
           final displayName = _containsArabic(localizedName) ? localizedName : null;
           final nameForData = _containsArabic(localizedName) ? englishName : localizedName;
           
+          final sel = selectedColorName != null ? _norm(selectedColorName) : '';
+          final locNorm = _norm(localizedName);
+          final engNorm = _norm(englishName);
+          final isSelectedColor = sel.isNotEmpty && (locNorm == sel || engNorm == sel ||
+              sel.startsWith(locNorm) || (engNorm.isNotEmpty && sel.startsWith(engNorm)) ||
+              locNorm.startsWith(sel) || (engNorm.isNotEmpty && engNorm.startsWith(sel)));
           return ColorOptionModel(
             id: localizedName,
             name: nameForData,
             displayName: displayName,
             code: '#000000',
             images: colorToImages[localizedName] ?? colorToImages[englishName] ?? (templateImage != null ? [templateImage] : parsedImages),
-            isSelected: selectedColorName != null ? (localizedName == selectedColorName || englishName == selectedColorName) : false,
+            isSelected: isSelectedColor,
           );
         }).toList();
         if (colorOptions.isNotEmpty && colorOptions.every((c) => !c.isSelected)) {
@@ -956,17 +1088,50 @@ class ProductDetailsModel extends ProductDetails {
       if (selectedVariant != null) {
         final selId = selectedVariant['id']?.toString();
         final selImg = selId != null ? variantIdToImage[selId] : null;
-        if (selImg != null && selImg.isNotEmpty) {
-          mainImages = [selImg];
+      if (selImg != null && selImg.isNotEmpty) {
+        mainImages = [selImg];
         }
       }
+
+      // Build value_id -> attribute info so we can fill variant_combinations.attributes
+      // from attribute_value_ids when the API sends that format (exact variant match by attribute value IDs).
+      final valueIdToAttributeInfo = _buildValueIdToAttributeInfo(variantAttributes);
+
+      // Initial values from lite response: price, in_stock, quantity_available.
+      // Support both shapes: root-level (type: "variant" response) or nested selected_variant.
+      double initialPrice = _parsePrice(json['price']);
+      bool initialInStock = (json['in_stock'] ?? true) == true;
+      int? initialSelectedVariantQuantityAvailable = _parseQuantityAvailable(json['quantity_available']);
+
+      final selectedVariantMap = json['selected_variant'] as Map<String, dynamic>?;
+      if (selectedVariantMap != null) {
+        final svPrice = selectedVariantMap['sales_price'] ?? selectedVariantMap['price'];
+        if (svPrice != null) initialPrice = _parsePrice(svPrice);
+        final svInStock = selectedVariantMap['in_stock'];
+        if (svInStock != null) initialInStock = svInStock == true;
+        final svQty = _parseQuantityAvailable(selectedVariantMap['quantity_available']);
+        if (svQty != null) {
+          initialSelectedVariantQuantityAvailable = svQty;
+          if (svQty <= 0) initialInStock = false;
+        }
+      } else {
+        // Root-level variant response: "price", "quantity_available", "in_stock" at root
+        if (initialSelectedVariantQuantityAvailable != null &&
+            initialSelectedVariantQuantityAvailable! <= 0) {
+          initialInStock = false;
+        }
+      }
+      print(
+        '📦 ProductDetailsModel: Initial from lite response → price=$initialPrice, '
+        'inStock=$initialInStock, quantity_available=$initialSelectedVariantQuantityAvailable',
+      );
 
       return ProductDetailsModel(
       id: json['id']?.toString() ?? '',
       brand: _parseBrand(json['brand']),
       name: json['name']?.toString() ?? '',
       description: _parseDescription(json),
-      price: _parsePrice(json['price']),
+      price: initialPrice,
       originalPrice: null,
       rating: 0,
       reviewCount: 0,
@@ -998,23 +1163,55 @@ class ProductDetailsModel extends ProductDetails {
       optionalProducts: _parseRelated(json['optional_product_ids'] as List<dynamic>?),
       accessoryProducts: _parseRelated(json['accessory_product_ids'] as List<dynamic>?),
       alternativeProducts: _parseRelated(json['alternative_product_ids'] as List<dynamic>?),
-      // Map raw variant combinations into entity models
-      // Note: ProductDetails uses its own VariantCombination class (simpler version)
+      // Map raw variant combinations into entity models.
+      // Match exact variant by comparing ALL attribute value IDs: variant_combinations.attributes
+      // (or attribute_value_ids) must contain attribute_id + value_id for each selected attribute.
       variantCombinations: _normalizeVariantCombinations(json['variant_combinations'])
           .where((v) => v != null && v is Map<String, dynamic>)
           .map((v) {
         final mv = v as Map<String, dynamic>;
-        final attrs = (mv['attributes'] as List<dynamic>? ?? const [])
-            .where((a) => a != null && a is Map<String, dynamic>)
-            .map((a) {
-          final ma = a as Map<String, dynamic>;
-          return VariantAttribute(
-            attributeName: (ma['attribute_name'] ?? '').toString(),
-            valueName: (ma['value_name'] ?? '').toString(),
-            attributeId: (ma['attribute_id'] ?? '').toString(),
-            valueId: (ma['value_id'] ?? '').toString(),
-          );
-        }).toList();
+        List<VariantAttribute> attrs;
+        final rawAttrs = (mv['attributes'] as List<dynamic>? ?? const []);
+        if (rawAttrs.isNotEmpty) {
+          attrs = rawAttrs
+              .where((a) => a != null && a is Map<String, dynamic>)
+              .map((a) {
+            final ma = a as Map<String, dynamic>;
+            return VariantAttribute(
+              attributeName: (ma['attribute_name'] ?? '').toString(),
+              valueName: (ma['value_name'] ?? '').toString(),
+              attributeId: (ma['attribute_id'] ?? '').toString(),
+              valueId: (ma['value_id'] ?? '').toString(),
+            );
+          }).toList();
+        } else {
+          // API may send attribute_value_ids (list of value IDs) instead of attributes array.
+          // Build attributes from variant_attributes so matching by attribute_id+value_id works.
+          attrs = [];
+          final valueIds = mv['attribute_value_ids'];
+          if (valueIds is List) {
+            for (final v in valueIds) {
+              final valueId = (v ?? '').toString();
+              if (valueId.isEmpty) continue;
+              final info = valueIdToAttributeInfo[valueId];
+              if (info != null) {
+                attrs.add(VariantAttribute(
+                  attributeName: info['attributeName'] ?? '',
+                  valueName: info['valueName'] ?? '',
+                  attributeId: info['attributeId'] ?? '',
+                  valueId: valueId,
+                ));
+              } else {
+                attrs.add(VariantAttribute(
+                  attributeName: '',
+                  valueName: '',
+                  attributeId: '',
+                  valueId: valueId,
+                ));
+              }
+            }
+          }
+        }
         // Parse all stock fields from the API response
         final variantId = mv['variant_id'];
         final variantIdStr = variantId is String 
@@ -1050,8 +1247,8 @@ class ProductDetailsModel extends ProductDetails {
         );
       }).toList(),
       primaryVariantLabel: primaryVariantLabel.isNotEmpty ? primaryVariantLabel : 'Size',
-      inStock: (json['in_stock'] ?? true) == true,
-      selectedVariantQuantityAvailable: null, // Set by BLoC when variant is resolved
+      inStock: initialInStock,
+      selectedVariantQuantityAvailable: initialSelectedVariantQuantityAvailable,
       // Parse product tags
       tags: (json['product_tag_ids'] as List<dynamic>? ?? const [])
           .where((tag) => tag != null && tag is Map<String, dynamic>)
@@ -1074,9 +1271,12 @@ class ProductDetailsModel extends ProductDetails {
     }
   }
 
-  /// Parse attribute_value_combinations from API response
-  /// Returns a map: value_id -> list of available combination value_ids
-  /// This is used for smart enable/disable logic in variant selection
+  /// Parse attribute_value_combinations from API response.
+  /// Supports two shapes:
+  /// 1) New: value_id -> { name, combinations: [{ variant_id, quantity_available, in_stock, available_combination_values }] }
+  ///    Only value_ids with at least one in-stock combination are added (chip active); value = list of compatible value_ids.
+  /// 2) Legacy: value_id -> List<id> or value_id -> Map with available_combination_values.
+  /// Returns map: value_id -> list of available combination value_ids (for compatibility checks).
   static Map<String, List<String>> _parseAttributeValueCombinations(Map<String, dynamic> json) {
     final Map<String, List<String>> combinations = {};
     
@@ -1090,37 +1290,61 @@ class ProductDetailsModel extends ProductDetails {
       
       print('🔍 ProductDetailsModel: Parsing attribute_value_combinations (${attrValueCombos.length} entries)');
       
-      // Parse each entry: value_id -> list of available value_ids
-      attrValueCombos.forEach((valueId, availableValues) {
-        if (availableValues is List) {
-          final valueIds = availableValues
+      attrValueCombos.forEach((valueId, rawEntry) {
+        final valueIdStr = valueId.toString();
+        if (rawEntry is List) {
+          final valueIds = rawEntry
               .map((v) => v.toString())
               .where((id) => id.isNotEmpty)
               .toList();
-          
           if (valueIds.isNotEmpty) {
-            combinations[valueId.toString()] = valueIds;
-            print('   value_id=$valueId → ${valueIds.length} available combinations');
+            combinations[valueIdStr] = valueIds;
           }
-        } else if (availableValues is Map) {
-          // Handle nested structure if API returns objects instead of IDs
-          final valueIds = <String>[];
-          for (final item in (availableValues['available_combination_values'] as List<dynamic>? ?? [])) {
-            if (item is Map) {
-              final id = (item['id'] ?? '').toString();
-              if (id.isNotEmpty) valueIds.add(id);
-            } else {
-              final id = item.toString();
-              if (id.isNotEmpty) valueIds.add(id);
+        } else if (rawEntry is Map) {
+          final entry = rawEntry as Map<String, dynamic>;
+          final combosList = entry['combinations'] as List<dynamic>?;
+          if (combosList != null && combosList.isNotEmpty) {
+            // New structure: only add value_id if at least one combination is in-stock
+            final inStockCombos = combosList.where((c) {
+              if (c is! Map) return false;
+              final inStock = (c['in_stock'] ?? false) as bool;
+              final qty = c['quantity_available'];
+              final qtyNum = qty is num ? qty.toDouble() : (qty != null ? double.tryParse(qty.toString()) ?? 0 : 0.0);
+              return inStock && (qty == null || qtyNum > 0);
+            }).toList();
+            if (inStockCombos.isEmpty) return; // no in-stock → do not add (chip disabled)
+            final Set<String> allIds = {};
+            for (final c in inStockCombos) {
+              if (c is! Map) continue;
+              final av = (c['available_combination_values'] as List<dynamic>?) ?? [];
+              for (final item in av) {
+                if (item is Map) {
+                  final id = (item['id'] ?? '').toString();
+                  if (id.isNotEmpty) allIds.add(id);
+                }
+              }
             }
-          }
-          if (valueIds.isNotEmpty) {
-            combinations[valueId.toString()] = valueIds;
+            combinations[valueIdStr] = allIds.toList();
+          } else {
+            // Legacy nested map (e.g. single object with available_combination_values)
+            final valueIds = <String>[];
+            for (final item in (entry['available_combination_values'] as List<dynamic>? ?? [])) {
+              if (item is Map) {
+                final id = (item['id'] ?? '').toString();
+                if (id.isNotEmpty) valueIds.add(id);
+              } else {
+                final id = item.toString();
+                if (id.isNotEmpty) valueIds.add(id);
+              }
+            }
+            if (valueIds.isNotEmpty) {
+              combinations[valueIdStr] = valueIds;
+            }
           }
         }
       });
       
-      print('✅ ProductDetailsModel: Parsed ${combinations.length} attribute_value_combinations');
+      print('✅ ProductDetailsModel: Parsed ${combinations.length} attribute_value_combinations (value_ids with in-stock combos)');
     } catch (e) {
       print('❌ ProductDetailsModel: Error parsing attribute_value_combinations: $e');
     }
@@ -1156,6 +1380,40 @@ class ProductDetailsModel extends ProductDetails {
     return 0.0;
   }
 
+  /// Parses quantity_available from API (e.g. 2.0, "2", 2) to int? for initial display.
+  static int? _parseQuantityAvailable(dynamic value) {
+    if (value == null) return null;
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    if (value is String) return int.tryParse(value);
+    return null;
+  }
+
+  /// Builds value_id -> { attributeId, attributeName, valueName } from variant_attributes.
+  /// Used to fill variant_combinations.attributes from attribute_value_ids when the API
+  /// sends that format (list of value IDs) instead of full attributes array.
+  static Map<String, Map<String, String>> _buildValueIdToAttributeInfo(List<dynamic> variantAttributes) {
+    final map = <String, Map<String, String>>{};
+    for (final attr in variantAttributes) {
+      if (attr is! Map<String, dynamic>) continue;
+      final attrId = (attr['id'] ?? '').toString();
+      final attrName = (attr['name'] ?? '').toString();
+      for (final val in (attr['values'] as List<dynamic>? ?? [])) {
+        if (val is! Map<String, dynamic>) continue;
+        final valueId = (val['id'] ?? '').toString();
+        final valueName = (val['name'] ?? '').toString();
+        if (valueId.isNotEmpty) {
+          map[valueId] = {
+            'attributeId': attrId,
+            'attributeName': attrName,
+            'valueName': valueName,
+          };
+        }
+      }
+    }
+    return map;
+  }
+
   /// Normalize backend variant_combinations payload into a List that the
   /// existing variant/stock/price logic can consume.
   ///
@@ -1182,6 +1440,16 @@ class ProductDetailsModel extends ProductDetails {
     // Arabic Unicode range: U+0600 to U+06FF
     final arabicRegex = RegExp(r'[\u0600-\u06FF]');
     return arabicRegex.hasMatch(text);
+  }
+
+  /// Normalize string for selected_variant matching (case-insensitive, trim).
+  /// E.g. "BLACK 01" from API matches "Black" in variant_attributes.
+  static String _norm(String s) => s.trim().toLowerCase();
+
+  /// True if the attribute is a color (COLOR NAME, color, etc.).
+  static bool _isColorAttributeName(String name) {
+    final n = name.toLowerCase().trim();
+    return n == 'color' || n == 'colour' || n == 'اللون' || n == 'color name';
   }
 
   static List<String> _parseImages(dynamic images, {String? productType, String? productId}) {

@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:provider/provider.dart';
 import '../../../../core/constants/responsive_constants.dart';
 import '../../../../core/theme/app_fonts.dart';
 import '../../domain/entities/product_details.dart';
+import '../bloc/product_details_bloc.dart';
 import '../controllers/dynamic_variant_controller.dart' show DynamicVariantController, ValueState;
 import '../utils/attribute_label_helper.dart';
 
@@ -179,7 +181,12 @@ class _AttributeSection extends StatelessWidget {
                 return const SizedBox.shrink();
               }
               
-              final isSelected = selectedValueId == valueId;
+              // On initial load, when the controller has not yet built
+              // selectedAttributes, fall back to the model's isSelected flag
+              // (set from `selected_variant` in the first API response).
+              final isSelected = selectedValueId != null
+                  ? selectedValueId == valueId
+                  : value.isSelected;
               
               // Get the state of this value (three-state logic)
               final valueState = controller.getValueState(attributeId, valueId);
@@ -212,6 +219,14 @@ class _AttributeSection extends StatelessWidget {
                         debugPrint('🎯 DynamicVariantSelector: Selected $attributeName (id: $attributeId) → ${value.name} (id: $valueId)');
                         debugPrint('   State: $valueState');
                         debugPrint('   Stock info: ${stockInfo['inStock']}, Qty: ${stockInfo['quantity']}');
+                        // Sync with latest product details and variant_combinations from normal API
+                        try {
+                          final state = context.read<ProductDetailsBloc>().state;
+                          if (state is ProductDetailsLoaded) {
+                            controller.updateProductDetails(state.productDetails);
+                            controller.setVariantCombinationsForMatching(state.variantCombinationsFromNormalApi);
+                          }
+                        } catch (_) {}
                         controller.selectAttributeValue(attributeId, valueId);
                       }
                     : null,

@@ -4,7 +4,10 @@ import '../../product_details/domain/entities/product_details.dart';
 import 'models/product_details_model.dart';
 
 /// Runs the full ProductDetails parsing (including variant/attribute building)
-/// on a background isolate so it does not block the UI thread.
+/// on a background isolate so it does not block the main thread.
+///
+/// Used only for the **normal** (heavy) API response. The lite response is
+/// parsed on the main thread (small payload, no isolate overhead = faster first paint).
 ///
 /// This offloads:
 /// - variant_combinations normalization

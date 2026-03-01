@@ -27,12 +27,17 @@ class ProductDetailsLoaded extends ProductDetailsState {
   /// True while we are recomputing variant/attribute availability
   /// (e.g. after a color/attribute selection) so the UI can show a loader.
   final bool isVariantFilterLoading;
+  /// Variant combinations from the normal API (api_load=normal).
+  /// Kept separate from lite product so they are not overridden; used for
+  /// matching on attribute click. Lite response has empty variant_combinations.
+  final List<VariantCombination>? variantCombinationsFromNormalApi;
 
   const ProductDetailsLoaded(
     this.productDetails, {
     this.quantity = 1,
     this.isAdding = false,
     this.isVariantFilterLoading = false,
+    this.variantCombinationsFromNormalApi,
   });
 
   ProductDetailsLoaded copyWith({
@@ -40,6 +45,7 @@ class ProductDetailsLoaded extends ProductDetailsState {
     int? quantity,
     bool? isAdding,
     bool? isVariantFilterLoading,
+    List<VariantCombination>? variantCombinationsFromNormalApi,
   }) {
     return ProductDetailsLoaded(
       productDetails ?? this.productDetails,
@@ -47,12 +53,19 @@ class ProductDetailsLoaded extends ProductDetailsState {
       isAdding: isAdding ?? this.isAdding,
       isVariantFilterLoading:
           isVariantFilterLoading ?? this.isVariantFilterLoading,
+      variantCombinationsFromNormalApi:
+          variantCombinationsFromNormalApi ?? this.variantCombinationsFromNormalApi,
     );
   }
 
   @override
-  List<Object?> get props =>
-      [productDetails, quantity, isAdding, isVariantFilterLoading];
+  List<Object?> get props => [
+        productDetails,
+        quantity,
+        isAdding,
+        isVariantFilterLoading,
+        variantCombinationsFromNormalApi,
+      ];
 }
 
 class ProductDetailsError extends ProductDetailsState {

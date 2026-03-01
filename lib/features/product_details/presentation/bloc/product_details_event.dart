@@ -148,3 +148,46 @@ class SelectVariantByIdEvent extends ProductDetailsEvent {
   @override
   List<Object?> get props => [variantId];
 }
+
+/// Internal event used to load the full variant combinations/attributes
+/// payload (api_load = normal) after the initial lite product load has
+/// already populated the UI.
+class LoadProductVariantsCombinationsEvent extends ProductDetailsEvent {
+  final String productId;
+  final String productType;
+
+  const LoadProductVariantsCombinationsEvent({
+    required this.productId,
+    this.productType = 'variant',
+  });
+
+  @override
+  List<Object?> get props => [productId, productType];
+}
+
+/// Internal event: merge full variant data (from normal API) into current product.
+/// Fired when the normal API completes; can complete before or after lite.
+class MergeFullVariantDataEvent extends ProductDetailsEvent {
+  final ProductDetails fullDetails;
+
+  const MergeFullVariantDataEvent({required this.fullDetails});
+
+  @override
+  List<Object?> get props => [fullDetails];
+}
+
+/// Fallback: when user clicks an attribute and normal API has not provided
+/// variant_combinations (loading, empty, or failed), fetch variant data via
+/// /ecom/get/variant/lite with current selected attribute value IDs.
+class FetchVariantLiteFallbackEvent extends ProductDetailsEvent {
+  final String productId;
+  final List<int> attributeValueIds;
+
+  const FetchVariantLiteFallbackEvent({
+    required this.productId,
+    required this.attributeValueIds,
+  });
+
+  @override
+  List<Object?> get props => [productId, attributeValueIds];
+}

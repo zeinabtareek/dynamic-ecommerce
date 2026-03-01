@@ -26,6 +26,7 @@ import '../../../cart/presentation/widgets/cart_button_with_badge.dart';
 import '../../../cart/presentation/bloc/cart_bloc.dart';
 import '../../../../core/services/app_localization_service.dart';
 import '../../../../core/services/language_service.dart';
+import '../widgets/color_selection_widget.dart' show ColorSelectionSkeleton;
 
 class ProductDetailsPage extends StatefulWidget {
   final String productId;
@@ -107,6 +108,26 @@ class _ProductDetailsPageState extends State<ProductDetailsPage>
     });
   }
 
+  /// When user selects an attribute and normal API has not provided variant_combinations
+  /// (loading, empty, or failed), trigger variant lite fallback API.
+  void _onAfterAttributeSelected() {
+    final blocState = context.read<ProductDetailsBloc>().state;
+    if (blocState is! ProductDetailsLoaded) return;
+    if (blocState.variantCombinationsFromNormalApi != null &&
+        blocState.variantCombinationsFromNormalApi!.isNotEmpty) {
+      return; // Already have variant data, no fallback needed
+    }
+    final productId = blocState.productDetails.id;
+    final valueIds = _variantController.selectedAttributes.values.toList();
+    if (valueIds.isEmpty) return;
+    context.read<ProductDetailsBloc>().add(
+          FetchVariantLiteFallbackEvent(
+            productId: productId,
+            attributeValueIds: valueIds,
+          ),
+        );
+  }
+
   void _onLanguageChanged() {
     final currentLanguage = _localizationService.currentLocale.languageCode;
     
@@ -158,6 +179,7 @@ class _ProductDetailsPageState extends State<ProductDetailsPage>
           if (state is ProductDetailsLoaded && !_isControllerInitialized) {
             debugPrint('🔄 ProductDetailsPage: Initializing variant controller with product details (first load)');
             _variantController.initialize(state.productDetails);
+            _variantController.setVariantCombinationsForMatching(state.variantCombinationsFromNormalApi);
             _isControllerInitialized = true;
             debugPrint('✅ ProductDetailsPage: Variant controller initialized');
             debugPrint('   Selected attributes: ${_variantController.selectedAttributes}');
@@ -165,10 +187,10 @@ class _ProductDetailsPageState extends State<ProductDetailsPage>
             debugPrint('   In Stock: ${_variantController.inStock}');
             debugPrint('   Quantity: ${_variantController.quantityAvailable}');
           } else if (state is ProductDetailsLoaded && _isControllerInitialized) {
-            // On subsequent state changes (like color selection), update product details
-            // but preserve user's current selection
+            // On subsequent state changes (e.g. normal API merged), sync controller
             debugPrint('🔄 ProductDetailsPage: Product details updated, syncing controller (preserving selection)');
             _variantController.updateProductDetails(state.productDetails);
+            _variantController.setVariantCombinationsForMatching(state.variantCombinationsFromNormalApi);
           }
           
           if (state is ProductDetailsError) {
@@ -351,7 +373,11 @@ class _ProductDetailsPageState extends State<ProductDetailsPage>
       controller: _scrollController,
       slivers: [
         SliverAppBar(
-          expandedHeight: ResponsiveConstants.productDetailsAppBarHeight,
+          // Show a smaller hero image in preview so more skeleton content is visible,
+          // and full height once real product details are loaded.
+          expandedHeight: isLoaded
+              ? ResponsiveConstants.productDetailsAppBarHeight
+              : ResponsiveConstants.productDetailsAppBarHeight * 0.7,
           floating: false,
           pinned: true,
           elevation: 0,
@@ -412,6 +438,7 @@ class _ProductDetailsPageState extends State<ProductDetailsPage>
                         productDetails: productDetails!,
                         pageController: _pageController,
                         variantImageUrls: variantController.currentImages,
+                        onAfterAttributeSelected: _onAfterAttributeSelected,
                       );
                     },
                   )
@@ -422,6 +449,7 @@ class _ProductDetailsPageState extends State<ProductDetailsPage>
           productDetails: productDetails,
           cardPreview: cardPreview,
           scrollController: _scrollController,
+          onAfterAttributeSelected: _onAfterAttributeSelected,
         ),
         SliverToBoxAdapter(
           child: SizedBox(height: ResponsiveConstants.lgSpacing),
@@ -463,15 +491,28 @@ class _ProductDetailsPageState extends State<ProductDetailsPage>
   Widget _buildPreviewImage(ProductDetailsCardPreview preview) {
     final colorScheme = Theme.of(context).colorScheme;
     return Container(
-      color: colorScheme.surface,
+      color: colorScheme.background,
       child: preview.imageUrl != null && preview.imageUrl!.isNotEmpty
-          ? Center(
-              child: CachedNetworkImage(
-                imageUrl: preview.imageUrl!,
-                fit: BoxFit.contain,
-                placeholder: (_, __) => Container(color: colorScheme.surface),
-                errorWidget: (_, __, ___) => Container(color: colorScheme.surface),
-              ),
+          ? Stack(
+              fit: StackFit.expand,
+              children: [
+                Center(
+                  child: CachedNetworkImage(
+                    imageUrl: preview.imageUrl!,
+                    fit: BoxFit.contain,
+                    placeholder: (_, __) =>
+                        Container(color: colorScheme.background),
+                    errorWidget: (_, __, ___) =>
+                        Container(color: colorScheme.background),
+                  ),
+                ),
+                Positioned(
+                  left: ResponsiveConstants.mdPadding,
+                  right: ResponsiveConstants.mdPadding,
+                  bottom: ResponsiveConstants.mdPadding,
+                  child: ColorSelectionSkeleton(colorScheme: colorScheme),
+                ),
+              ],
             )
           : null,
     );

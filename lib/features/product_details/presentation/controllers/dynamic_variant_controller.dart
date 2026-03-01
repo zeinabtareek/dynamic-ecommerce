@@ -44,6 +44,11 @@ class DynamicVariantController extends ChangeNotifier {
   /// Loading state for async operations
   bool _isLoading = false;
 
+  /// Variant combinations from normal API (api_load=normal). Kept separate from
+  /// lite product; used for matching on attribute click so we don't rely on
+  /// merged productDetails.variantCombinations (which can be empty from lite).
+  List<VariantCombination>? _variantCombinationsFromNormalApi;
+
   // Getters
   Map<int, int> get selectedAttributes => Map.unmodifiable(_selectedAttributes);
   VariantCombination? get selectedVariant => _selectedVariant;
@@ -55,30 +60,55 @@ class DynamicVariantController extends ChangeNotifier {
   bool get isLoading => _isLoading;
   ProductDetails? get productDetails => _productDetails;
 
+  /// Set variant combinations from the normal API. Call this when BLoC has
+  /// loaded full data (variantCombinationsFromNormalApi). Used for matching
+  /// on attribute click instead of productDetails.variantCombinations (lite is empty).
+  void setVariantCombinationsForMatching(List<VariantCombination>? combinations) {
+    _variantCombinationsFromNormalApi = combinations != null && combinations.isNotEmpty
+        ? List.from(combinations)
+        : null;
+    debugPrint('🔄 DynamicVariantController.setVariantCombinationsForMatching() → ${_variantCombinationsFromNormalApi?.length ?? 0} variants');
+  }
+
   /// Initialize the controller with product details and selected variant
   /// CRITICAL: Always selects the first in-stock variant, ignoring any pre-existing
   /// selections in ProductDetails that might not match an in-stock variant
   void initialize(ProductDetails productDetails) {
     _productDetails = productDetails;
-    
+    _variantCombinationsFromNormalApi = null; // cleared for new product; set when normal API arrives
+
     debugPrint('🔄 DynamicVariantController.initialize() called');
     debugPrint('   Product ID: ${productDetails.id}');
-    debugPrint('   Total variants: ${productDetails.variantCombinations.length}');
+    debugPrint('   Total variants (from product): ${productDetails.variantCombinations.length}');
     debugPrint('   In-stock variants: ${productDetails.variantCombinations.where((v) => v.inStock && (v.quantityAvailable ?? 0) > 0).length}');
     debugPrint('   Current selection before init: $_selectedAttributes');
-    
-    // Initialize selectedAttributes from first in-stock variant
-    // This ensures users always start with a valid, purchasable combination
-    _initializeFromSelectedVariant();
-    
-    // Find and store the matching variant
-    _updateMatchingVariant();
-    
-    debugPrint('✅ DynamicVariantController initialization complete');
-    debugPrint('   Final selected attributes: $_selectedAttributes');
+
+    // Lightweight initialization:
+    // - Build selectedAttributes from ProductDetails' current selection
+    //   (variantAttributeOptions + attributeId/valueId) without scanning
+    //   variantCombinations.
+    // - Do NOT resolve the concrete variant or stock here; that work is
+    //   deferred until the user actually interacts with attributes.
+    _initializeSelectedAttributesFromProductDetails();
+
+    // Reset variant/stock state to a neutral baseline; price/images come
+    // directly from ProductDetails (already computed on the isolate).
+    _setNoVariantState();
+
+    // Initial (lite): use selected_variant values from productDetails when we have no variant list to match
+    final hasNoVariantList = (_variantCombinationsFromNormalApi == null || _variantCombinationsFromNormalApi!.isEmpty) &&
+        productDetails.variantCombinations.isEmpty;
+    if (hasNoVariantList) {
+      _inStock = productDetails.inStock;
+      _quantityAvailable = productDetails.selectedVariantQuantityAvailable ?? 0;
+      debugPrint('   Initial from lite selected_variant: inStock=$_inStock, quantityAvailable=$_quantityAvailable');
+    }
+
+    debugPrint('✅ DynamicVariantController initialization complete (no variant matching yet)');
+    debugPrint('   Initial selected attributes: $_selectedAttributes');
     debugPrint('   Matched variant ID: $_variantId');
     debugPrint('   In stock: $_inStock, Quantity: $_quantityAvailable');
-    
+
     notifyListeners();
   }
 
@@ -96,15 +126,74 @@ class DynamicVariantController extends ChangeNotifier {
     
     debugPrint('🔄 DynamicVariantController.updateProductDetails() called');
     debugPrint('   Preserving selection: $_selectedAttributes');
-    
-    // Recalculate matching variant with updated product details
-    _updateMatchingVariant();
-    
-    debugPrint('✅ DynamicVariantController product details updated');
-    debugPrint('   Matched variant ID: $_variantId');
+
+    // When product details are refreshed (e.g. after second API with full
+    // variant combinations), keep the current selection and avoid heavy
+    // variant matching here. Matching will be performed lazily when the
+    // user interacts with attributes.
+
+    debugPrint('✅ DynamicVariantController product details updated (no variant rematch)');
+    debugPrint('   Matched variant ID (unchanged): $_variantId');
     debugPrint('   In stock: $_inStock, Quantity: $_quantityAvailable');
-    
+
     notifyListeners();
+  }
+
+  /// Build selectedAttributes from ProductDetails' current selection
+  /// (variantAttributeOptions) without scanning variantCombinations.
+  /// Uses attribute_id + value_id from options as the single source of truth.
+  void _initializeSelectedAttributesFromProductDetails() {
+    _selectedAttributes.clear();
+    if (_productDetails == null) return;
+
+    final pd = _productDetails!;
+
+    for (final opt in pd.variantAttributeOptions) {
+      final attrIdStr = opt.attributeId;
+      if (attrIdStr == null || attrIdStr.isEmpty) continue;
+      final parsedAttrId = int.tryParse(attrIdStr);
+      if (parsedAttrId == null) continue;
+
+      final selectedValueName = opt.selectedValue;
+      if (selectedValueName.isEmpty) {
+        debugPrint(
+          '⚠️ [Step 3 - Controller] Skipping "${opt.attributeName}": selectedValue is empty '
+          '(model did not set it from selected_variant?)',
+        );
+        continue;
+      }
+
+      // Find the concrete value object so we can get its id (value_id).
+      // Avoid firstWhere(orElse) so we don't require VariantAttributeValueModel in the controller.
+      final matching = opt.values.where((v) => v.name == selectedValueName).toList();
+      if (matching.isEmpty) {
+        debugPrint(
+          '⚠️ [Step 3 - Controller] Skipping "${opt.attributeName}": no value with name "$selectedValueName" '
+          '(available: ${opt.values.map((v) => v.name).toList()})',
+        );
+        continue;
+      }
+      final matchingValue = matching.first;
+
+      if (matchingValue.id.isEmpty) {
+        debugPrint(
+          '⚠️ [Step 3 - Controller] Skipping "${opt.attributeName}": no value with name "$selectedValueName" '
+          '(available: ${opt.values.map((v) => v.name).toList()})',
+        );
+        continue;
+      }
+      final parsedValueId = int.tryParse(matchingValue.id);
+      if (parsedValueId == null) continue;
+
+      _selectedAttributes[parsedAttrId] = parsedValueId;
+
+      debugPrint(
+        '✅ [Step 3 - Controller] From ProductDetails (selected_variant): ${opt.attributeName} = ${matchingValue.name} '
+        '(attr_id: $parsedAttrId, value_id: $parsedValueId)',
+      );
+    }
+
+    debugPrint('📋 [Step 3 - Controller] Built selectedAttributes for UI: $_selectedAttributes');
   }
 
   /// Initialize selectedAttributes from the selected_variant in API response.
@@ -344,10 +433,27 @@ class DynamicVariantController extends ChangeNotifier {
     // Recalculate matching variant
     _updateMatchingVariant();
     
+    // Update images only when color is selected (both color sections on product details page)
+    if (_isColorAttribute(attributeId)) {
+      _updateImages();
+    }
+    
     debugPrint('🔄 DynamicVariantController: Notifying listeners');
     debugPrint('   Final state: inStock=$_inStock, qty=$_quantityAvailable, variantId=$_variantId');
     
     notifyListeners();
+  }
+  
+  /// Returns true if [attributeId] is the color attribute (so we update images only on color change).
+  bool _isColorAttribute(int attributeId) {
+    if (_productDetails == null) return false;
+    for (final opt in _productDetails!.variantAttributeOptions) {
+      final id = int.tryParse(opt.attributeId ?? '');
+      if (id != attributeId) continue;
+      final name = (opt.attributeName).toLowerCase();
+      return name.contains('color') || name == 'colour' || name == 'اللون' || name.contains('لون');
+    }
+    return false;
   }
   
   /// Clear attributes that become invalid after selecting a new value
@@ -468,21 +574,26 @@ class DynamicVariantController extends ChangeNotifier {
 
   /// Update the matching variant based on current selectedAttributes
   void _updateMatchingVariant() {
+    debugPrint('━━━ [VariantMatch] _updateMatchingVariant() ENTRY ━━━');
+    debugPrint('   Input selectedAttributes (attr_id → value_id): $_selectedAttributes');
+
     if (_productDetails == null) {
+      debugPrint('   ❌ Early exit: _productDetails is null');
       _setNoVariantState();
       return;
     }
-    
-    // If no attributes selected yet, don't set a variant (wait for initial selection)
+
     if (_selectedAttributes.isEmpty) {
+      debugPrint('   ❌ Early exit: no attributes selected');
       _setNoVariantState();
       return;
     }
-    
-    // Find ALL matching variants from variant_combinations
+
+    debugPrint('   Calling _findAllMatchingVariants()...');
     final matchingVariants = _findAllMatchingVariants();
-    
+
     if (matchingVariants.isNotEmpty) {
+      debugPrint('   ✅ _updateMatchingVariant: Got ${matchingVariants.length} matching variant(s)');
       // When multiple match, prefer the variant that matches ProductDetails.selectedColor/selectedSize
       // so catalog-driven selection (e.g. 4th color) is not overwritten by "first in list" (e.g. 3rd).
       _selectedVariant = _pickVariantMatchingProductDetailsSelection(matchingVariants);
@@ -505,8 +616,8 @@ class DynamicVariantController extends ChangeNotifier {
       _quantityAvailable = totalQuantity;
       _variantId = _selectedVariant!.variantId; // Use picked variant (matches selectedColor/selectedSize when multiple match)
       
-      // Update images
-      _updateImages();
+      // Do NOT update images here – avoid reloading images when user changes size/material/height/color.
+      // Images are set once at init; reload only when user explicitly interacts with the image (e.g. opens gallery).
       
       debugPrint('✅ DynamicVariantController: Found ${matchingVariants.length} matching variant(s)');
       debugPrint('   Total quantity (summed): $_quantityAvailable');
@@ -519,30 +630,49 @@ class DynamicVariantController extends ChangeNotifier {
         final v = matchingVariants[i];
         debugPrint('   Variant $i: variantId=${v.variantId}, qty=${v.quantityAvailable}, inStock=${v.inStock}, price=${v.price}');
       }
+      debugPrint('━━━ [VariantMatch] _updateMatchingVariant() RESULT: variantId=$_variantId, inStock=$_inStock, qty=$_quantityAvailable ━━━');
     } else {
       _setNoVariantState();
-      debugPrint('❌ DynamicVariantController: No matching variant found for selection: $_selectedAttributes');
+      debugPrint('   ❌ No matching variants for selection: $_selectedAttributes');
+      debugPrint('━━━ [VariantMatch] _updateMatchingVariant() RESULT: NO MATCH (variantId=empty, inStock=false) ━━━');
     }
   }
 
-  /// Find ALL matching variants from variant_combinations
-  /// Returns all variants where ALL {attribute_id, value_id} pairs match selectedAttributes
+  /// Find ALL matching variants from variant_combinations.
+  /// Matching uses ALL selected attribute value IDs: each variant's
+  /// variant_combinations.attributes (or attribute_value_ids) must contain
+  /// every (attribute_id, value_id) pair from the current selection.
   List<VariantCombination> _findAllMatchingVariants() {
-    if (_productDetails == null) return [];
-    
+    debugPrint('  ┌─ [VariantMatch] _findAllMatchingVariants() ENTRY');
+    if (_productDetails == null) {
+      debugPrint('  │  ❌ _productDetails is null, returning []');
+      debugPrint('  └─ _findAllMatchingVariants() EXIT: 0 variants');
+      return [];
+    }
+
+    // Use ONLY variant_combinations from normal API (separate). Do NOT use productDetails (lite).
+    final combinations = _variantCombinationsFromNormalApi ?? const <VariantCombination>[];
+    debugPrint('  │  source: normal API (separate only, never lite); count=${combinations.length}');
     final matching = <VariantCombination>[];
-    debugPrint('🔍 _findAllMatchingVariants: Searching ${_productDetails!.variantCombinations.length} variants');
-    debugPrint('   Selected attributes: $_selectedAttributes');
-    
-    for (final variant in _productDetails!.variantCombinations) {
-      if (_variantMatchesSelection(variant)) {
+    debugPrint('  │  variant_combinations.length = ${combinations.length}');
+    debugPrint('  │  Selected (attr_id → value_id): $_selectedAttributes');
+
+    for (int i = 0; i < combinations.length; i++) {
+      final variant = combinations[i];
+      final didMatch = _variantMatchesSelection(variant);
+      if (didMatch) {
         matching.add(variant);
-        final qty = variant.quantityAvailable ?? 0;
-        debugPrint('   ✅ Match found: variantId=${variant.variantId}, qty=$qty, inStock=${variant.inStock}');
+        debugPrint('  │  [$i] variantId=${variant.variantId} → MATCH ✅ (qty=${variant.quantityAvailable}, inStock=${variant.inStock})');
+      } else {
+        debugPrint('  │  [$i] variantId=${variant.variantId} → no match');
       }
     }
-    
-    debugPrint('   Total matches: ${matching.length}');
+
+    debugPrint('  │  Total matches: ${matching.length}');
+    if (matching.isNotEmpty) {
+      debugPrint('  │  Matched variantIds: ${matching.map((v) => v.variantId).toList()}');
+    }
+    debugPrint('  └─ _findAllMatchingVariants() EXIT');
     return matching;
   }
 
@@ -553,25 +683,31 @@ class DynamicVariantController extends ChangeNotifier {
     return matching.isNotEmpty ? matching.first : null;
   }
 
-  /// Check if a variant matches the current selection
-  /// Returns true if ALL selected attributes match the variant's attributes
+  /// Check if a variant matches the current selection.
+  /// Uses variant_combinations.attributes: every selected (attribute_id, value_id)
+  /// must appear in the variant's attributes (match by attribute_id + value_id).
   bool _variantMatchesSelection(VariantCombination variant) {
-    // For each selected attribute, check if variant has matching attribute_id and value_id
+    // Build variant's attr_id → value_id map for debug
+    final variantAttrMap = <String, String>{};
+    for (final a in variant.attributes) {
+      if (a.attributeId != null && a.valueId != null) {
+        variantAttrMap[a.attributeId!] = a.valueId!;
+      }
+    }
+    debugPrint('      _variantMatchesSelection(variantId=${variant.variantId})');
+    debugPrint('        variant.attributes (attr_id→value_id): $variantAttrMap');
+
     for (final entry in _selectedAttributes.entries) {
       final selectedAttrId = entry.key;
       final selectedValueId = entry.value;
-      
-      // Find matching attribute in variant
+
       final matchingAttr = variant.attributes.firstWhere(
         (attr) {
           final attrId = attr.attributeId;
           final valueId = attr.valueId;
-          
           if (attrId == null || valueId == null) return false;
-          
           final parsedAttrId = int.tryParse(attrId);
           final parsedValueId = int.tryParse(valueId);
-          
           return parsedAttrId == selectedAttrId && parsedValueId == selectedValueId;
         },
         orElse: () => const VariantAttribute(
@@ -579,13 +715,15 @@ class DynamicVariantController extends ChangeNotifier {
           valueName: '',
         ),
       );
-      
-      // If no matching attribute found, this variant doesn't match
-      if (matchingAttr.attributeName.isEmpty) {
+
+      final found = matchingAttr.attributeName.isNotEmpty;
+      debugPrint('        selected attr_id=$selectedAttrId value_id=$selectedValueId → ${found ? "MATCH ✅" : "MISS ❌"}');
+      if (!found) {
+        debugPrint('        → variant ${variant.variantId}: NO MATCH (missing or wrong value for attr $selectedAttrId)');
         return false;
       }
     }
-    
+    debugPrint('        → variant ${variant.variantId}: ALL ATTRIBUTES MATCHED ✅');
     return true;
   }
 
@@ -659,6 +797,30 @@ class DynamicVariantController extends ChangeNotifier {
   bool _valueExistsInAnyInStockVariant(int attributeId, int valueId) {
     if (_productDetails == null) return false;
     
+    // Prefer using attribute_value_combinations when available. Backend builds this
+    // map only for values that participate in at-least-one in-stock combination,
+    // so presence in the map is a fast proxy for "exists in stock".
+    final combos = _productDetails!.attributeValueCombinations;
+    final valueIdStr = valueId.toString();
+    if (combos.isNotEmpty) {
+      // Quick check: valueId appears as a key
+      if (combos.containsKey(valueIdStr) &&
+          _isValueIdForAttribute(valueId, attributeId)) {
+        return true;
+      }
+
+      // Otherwise, scan value lists once and verify the value belongs to this attribute.
+      for (final entry in combos.entries) {
+        if (entry.value.contains(valueIdStr) &&
+            _isValueIdForAttribute(valueId, attributeId)) {
+          return true;
+        }
+      }
+
+      return false;
+    }
+    
+    // Fallback: full variant scan when combinations map is not available.
     for (final variant in _productDetails!.variantCombinations) {
       final qty = variant.quantityAvailable ?? 0;
       if (!variant.inStock || qty <= 0) continue;

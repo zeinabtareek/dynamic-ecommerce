@@ -10,12 +10,14 @@ class CollapsibleImageSectionWidget extends StatelessWidget {
   final ProductDetails productDetails;
   final PageController pageController;
   final List<String>? variantImageUrls;
+  final VoidCallback? onAfterAttributeSelected;
 
   const CollapsibleImageSectionWidget({
     super.key,
     required this.productDetails,
     required this.pageController,
     this.variantImageUrls,
+    this.onAfterAttributeSelected,
   });
 
   @override
@@ -46,6 +48,7 @@ class CollapsibleImageSectionWidget extends StatelessWidget {
             // Color Selection - Top left (kept in sync with controller)
             ColorSelectionWidget(
               productDetails: currentProduct,
+              onAfterAttributeSelected: onAfterAttributeSelected,
             ),
 
             // Page Indicator - Above images, centered

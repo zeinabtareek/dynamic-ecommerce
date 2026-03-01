@@ -6,6 +6,7 @@ import '../../../../core/constants/app_constants.dart';
 import '../../domain/entities/product_details.dart';
 import '../../domain/entities/product_details_card_preview.dart';
 import '../../domain/usecases/get_product_details.dart';
+import '../../domain/usecases/get_variant_lite.dart';
 import '../../domain/usecases/toggle_favorite.dart';
 import '../../domain/usecases/select_color.dart';
 import '../../domain/usecases/select_size.dart';
@@ -18,14 +19,21 @@ part 'product_details_state.dart';
 
 class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> {
   final GetProductDetails getProductDetails;
+  final GetVariantLite getVariantLite;
   final ToggleFavorite toggleFavorite;
   final SelectColor selectColor;
   final SelectSize selectSize;
   final AddToCart addToCart;
   final CartBloc cartBloc;
 
+  /// When normal API completes before lite, merge is skipped (state not Loaded).
+  /// Store variant_combinations here and apply when we emit ProductDetailsLoaded from lite.
+  List<VariantCombination>? _pendingVariantCombinationsFromNormalApi;
+  String? _pendingNormalApiProductId;
+
   ProductDetailsBloc({
     required this.getProductDetails,
+    required this.getVariantLite,
     required this.toggleFavorite,
     required this.selectColor,
     required this.selectSize,
@@ -46,6 +54,9 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
     on<ResetQuantityEvent>(_onResetQuantity);
     on<ResetAddingStateEvent>(_onResetAddingState);
     on<SelectVariantByIdEvent>(_onSelectVariantById);
+    on<LoadProductVariantsCombinationsEvent>(_onLoadProductVariantsCombinations);
+    on<MergeFullVariantDataEvent>(_onMergeFullVariantData);
+    on<FetchVariantLiteFallbackEvent>(_onFetchVariantLiteFallback);
   }
 
   /// Stock rule for variant combinations.
@@ -307,8 +318,8 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
       'images=${updatedProduct.images}',
     );
 
-    emit(ProductDetailsLoaded(
-      updatedProduct,
+    emit(blocState.copyWith(
+      productDetails: updatedProduct,
       quantity: blocState.quantity,
       isAdding: blocState.isAdding,
     ));
@@ -474,7 +485,7 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         // Images update only on color change; do not change images when material is selected.
       }
       
-      emit(ProductDetailsLoaded(updated, quantity: nextQuantity, isAdding: false));
+      emit(s.copyWith(productDetails: updated, quantity: nextQuantity, isAdding: false));
     }
   }
 
@@ -644,7 +655,7 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         // Images update only on color change; do not change images when heel height is selected.
       }
       
-      emit(ProductDetailsLoaded(updated, quantity: nextQuantity, isAdding: false));
+      emit(s.copyWith(productDetails: updated, quantity: nextQuantity, isAdding: false));
     }
   }
 
@@ -1356,8 +1367,8 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         );
       }
 
-    emit(ProductDetailsLoaded(
-      updatedProduct,
+    emit(blocState.copyWith(
+      productDetails: updatedProduct,
       quantity: nextQuantity,
       isAdding: false,
     ));
@@ -1372,15 +1383,68 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
     debugPrint('🔄 ProductDetailsBloc: Loading product details');
     debugPrint('  - Product ID: ${event.productId}');
     debugPrint('  - Product Type: ${event.productType}');
-    debugPrint('  - Product ID Type: ${event.productId.runtimeType}');
-    debugPrint('  - Product Type Type: ${event.productType.runtimeType}');
     
-    final result = await getProductDetails(event.productId, productType: event.productType);
+    // Run both APIs in parallel: lite for first paint, normal (heavy) in background.
+    // When normal completes we merge via MergeFullVariantDataEvent.
+    final productId = event.productId;
+    final productType = event.productType;
+    final normalFuture = getProductDetails(productId, productType: productType, apiLoad: 'normal');
+    normalFuture.then((fullResult) {
+      fullResult.fold(
+        (failure) => debugPrint(
+          '⚠️ ProductDetailsBloc: [Background] Normal API failed: ${failure.message}',
+        ),
+        (fullDetails) {
+          debugPrint(
+            '📡 [Normal API] Future completed: parsed fullDetails has '
+            'variantCombinations.length=${fullDetails.variantCombinations.length}, '
+            'sending MergeFullVariantDataEvent',
+          );
+          add(MergeFullVariantDataEvent(fullDetails: fullDetails));
+        },
+      );
+    });
+    
+    debugPrint(
+      '🛰 ProductDetailsBloc: Sending /ecom/get/product (api_load=lite) and (api_load=normal) in parallel',
+    );
+    final liteStopwatch = Stopwatch()..start();
+    final result = await getProductDetails(
+      productId,
+      productType: productType,
+      apiLoad: 'lite',
+    );
+    liteStopwatch.stop();
+    debugPrint(
+      '⏱ ProductDetailsBloc: End‑to‑end lite load (network + isolate + bloc logic) '
+      'took ${liteStopwatch.elapsedMilliseconds} ms for id=${event.productId}',
+    );
     
     result.fold(
       (failure) => emit(ProductDetailsError(failure.message)),
       (productDetails) {
+        debugPrint(
+          '📡 ProductDetailsBloc: Received /ecom/get/product response (api_load=lite) '
+          'for id=${event.productId} → '
+          'variants=${productDetails.variantCombinations.length}, '
+          'attrs=${productDetails.variantAttributeOptions.length}',
+        );
         debugPrint('🔢 Setting initial quantity to 1 for product: ${productDetails.name}');
+        debugPrint(
+          '🎯 [_onLoadProductDetails] Initial selection from model '
+          '(first API / selected_variant): '
+          'selectedColor="${productDetails.selectedColor}", '
+          'selectedSize="${productDetails.selectedSize}", '
+          'selectedMaterial="${productDetails.selectedMaterial}", '
+          'selectedHeelHeightCm=${productDetails.selectedHeelHeightCm?.toStringAsFixed(1) ?? "null"}',
+        );
+        for (final opt in productDetails.variantAttributeOptions) {
+          debugPrint(
+            '   → option "${opt.attributeName}" apiName="${opt.apiAttributeName ?? ''}" '
+            'selectedValue="${opt.selectedValue}" '
+            'valuesSelected=${opt.values.where((v) => v.isSelected).map((v) => v.name).toList()}',
+          );
+        }
         
         // Helper to get color value from variant trying multiple attribute names
         String? getVariantColorValue(VariantCombination v) {
@@ -1396,129 +1460,37 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         
         String normalize(String s) => s.toLowerCase().trim();
 
-        // If we opened from catalog with a variant ID, match it in variant_combinations
-        // and use that variant's attributes as initial selection (so the same variant appears selected in UI).
+        // NOTE:
+        // We no longer loop over `variant_combinations` here to find a matching
+        // catalog variant. The backend now provides a dedicated `selected_variant`
+        // field, and `ProductDetailsModel.fromApiJson` already uses it to
+        // pre‑select attribute values for the initial state. This avoids the
+        // extra O(N) loop on first load and relies entirely on the first API
+        // response for initial attribute selection.
         String? overrideSelectedColor;
         String? overrideSelectedSize;
         String? overrideSelectedMaterial;
         double? overrideSelectedHeelHeight;
         List<VariantAttributeOption>? overrideVariantAttributeOptions;
-        final requestedId = event.productId.trim();
-        debugPrint('🔍 [Catalog→Details] ID we are sending (from catalog): "$requestedId" (type: ${requestedId.runtimeType})');
-        if (requestedId.isNotEmpty && productDetails.variantCombinations.isNotEmpty) {
-          debugPrint('🔍 [Catalog→Details] Looping variant_combinations (count: ${productDetails.variantCombinations.length}):');
-          VariantCombination? catalogVariant;
-          for (final v in productDetails.variantCombinations) {
-            final comboId = v.variantId.toString().trim();
-            final match = comboId == requestedId;
-            debugPrint('   - variant_id from combo: "$comboId" | requested: "$requestedId" | match: $match');
-            if (match) {
-              catalogVariant = v;
-              break;
-            }
-          }
-          if (catalogVariant != null) {
-            debugPrint('✅ [Catalog→Details] MATCH: variantId=$requestedId → using its attributes as initial selection');
-            debugPrint('🔍 [Catalog→Details] Values fetched from matched variant (variant_combinations entry):');
-            for (final attr in catalogVariant.attributes) {
-              debugPrint('   - ${attr.attributeName}: "${attr.valueName}" (value_id: ${attr.valueId})');
-            }
-            overrideSelectedColor = _getVariantColorValue(catalogVariant);
-            overrideSelectedSize = _getVariantAttributeValue(
-              catalogVariant,
-              [
-                productDetails.primaryVariantLabel,
-                'size',
-                'SIZE',
-                'القياس',
-              ].where((s) => s.isNotEmpty).toList(),
-            );
-            overrideSelectedMaterial = _getVariantAttributeValue(
-              catalogVariant,
-              ['material', 'materials', 'material name', 'MATERIALS', 'Material'],
-            );
-            final heightStr = _getVariantAttributeValue(
-              catalogVariant,
-              ['height', 'heel height', 'HEIGHT', 'heel height cm'],
-            );
-            if (heightStr != null && heightStr.isNotEmpty) {
-              overrideSelectedHeelHeight = double.tryParse(
-                heightStr.replaceAll(RegExp(r'[^0-9.]'), ''),
-              );
-            }
-            debugPrint(
-              '📤 [Catalog→Details] Override values extracted from matched variant: '
-              'color="$overrideSelectedColor", size="$overrideSelectedSize", '
-              'material="$overrideSelectedMaterial", height=${overrideSelectedHeelHeight?.toStringAsFixed(1) ?? "null"}',
-            );
-            // Build variantAttributeOptions with selection from the matched variant
-            final opts = <VariantAttributeOption>[];
-            for (final opt in productDetails.variantAttributeOptions) {
-              final attrNames = [
-                opt.apiAttributeName,
-                opt.attributeName,
-                if (opt.attributeName.toLowerCase().contains('color')) 'COLOR NAME',
-                if (opt.attributeName.toLowerCase().contains('size')) productDetails.primaryVariantLabel,
-                if (opt.attributeName.toLowerCase().contains('material')) 'MATERIALS',
-                if (opt.attributeName.toLowerCase().contains('height')) 'HEIGHT',
-              ].whereType<String>().where((s) => s.isNotEmpty).toList();
-              final valueFromVariant = _getVariantAttributeValue(catalogVariant, attrNames);
-              final selectedValue = (valueFromVariant != null && valueFromVariant.isNotEmpty)
-                  ? valueFromVariant
-                  : opt.selectedValue;
-              final normSelected = normalize(selectedValue);
-              final newValues = opt.values.map((v) {
-                final isSelected = normSelected.isNotEmpty && normalize(v.name) == normSelected;
-                return VariantAttributeValue(
-                  id: v.id,
-                  name: v.name,
-                  isAvailable: v.isAvailable,
-                  isSelected: isSelected,
-                );
-              }).toList();
-              final selectedValueName = newValues.where((v) => v.isSelected).map((v) => v.name).join(', ');
-              debugPrint(
-                '   [Catalog→Details] variantAttributeOption: "${opt.attributeName}" → valueFromVariant="$valueFromVariant", '
-                'selectedValue="$selectedValue", isSelected value(s): [$selectedValueName]',
-              );
-              opts.add(VariantAttributeOption(
-                attributeName: opt.attributeName,
-                values: newValues,
-                selectedValue: selectedValue,
-                apiAttributeName: opt.apiAttributeName,
-                attributeId: opt.attributeId,
-              ));
-            }
-            overrideVariantAttributeOptions = opts;
-          } else {
-            debugPrint('❌ [Catalog→Details] NO MATCH: no variant_combinations entry with variant_id == "$requestedId"');
-          }
-        } else {
-          if (requestedId.isEmpty) {
-            debugPrint('🔍 [Catalog→Details] Skipping match: requested ID is empty');
-          } else if (productDetails.variantCombinations.isEmpty) {
-            debugPrint('🔍 [Catalog→Details] Skipping match: variant_combinations is empty');
-          }
-        }
         
-        // Update size options to reflect availability based on ALL variant combinations
+        // Update size options: use attribute_value_combinations when present (no loop); else fall back to variant_combinations loop
+        final avc = productDetails.attributeValueCombinations;
         final updatedSizeOptions = productDetails.sizeOptions.map((size) {
           bool hasInStockVariant = false;
-          
-          for (final v in productDetails.variantCombinations) {
-            final bool sizeMatch = v.hasAttributeValue(productDetails.primaryVariantLabel, size.name) ||
-                                  v.hasAttributeValue('size', size.name) ||
-                                  v.hasAttributeValue('SIZE', size.name);
-            if (!sizeMatch) continue;
-            
-            // Check stock (treat null quantity as available when inStock=true)
-            final isInStock = _isVariantInStock(v);
-            if (isInStock) {
-              hasInStockVariant = true;
-              break;
+          if (avc.isNotEmpty) {
+            hasInStockVariant = avc.containsKey(size.id);
+          } else {
+            for (final v in productDetails.variantCombinations) {
+              final bool sizeMatch = v.hasAttributeValue(productDetails.primaryVariantLabel, size.name) ||
+                                    v.hasAttributeValue('size', size.name) ||
+                                    v.hasAttributeValue('SIZE', size.name);
+              if (!sizeMatch) continue;
+              if (_isVariantInStock(v)) {
+                hasInStockVariant = true;
+                break;
+              }
             }
           }
-          
           return SizeOption(
             id: size.id,
             name: size.name,
@@ -1528,219 +1500,69 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
           );
         }).toList();
         
-        // Stored selection: at initial load use first value of each attribute when empty.
-        // If we matched a catalog variant, use its attributes; otherwise use API/model defaults.
-        // These variables are used to filter and get the variant (inStock, quantity_available).
-        String? initialSelectedSize = overrideSelectedSize ?? productDetails.selectedSize;
-        if (initialSelectedSize.isEmpty) {
-          for (final opt in productDetails.variantAttributeOptions) {
-            final attrNameLower = opt.attributeName.toLowerCase();
-            if ((attrNameLower == 'size' ||
-                 attrNameLower == productDetails.primaryVariantLabel.toLowerCase()) &&
-                opt.selectedValue.isNotEmpty) {
-              initialSelectedSize = opt.selectedValue;
-              break;
-            }
-          }
-        }
-        if ((initialSelectedSize ?? '').isEmpty && productDetails.sizeOptions.isNotEmpty) {
-          initialSelectedSize = productDetails.sizeOptions.first.name;
-        }
-        if ((initialSelectedSize ?? '').isEmpty) {
-          for (final opt in productDetails.variantAttributeOptions) {
-            final attrNameLower = opt.attributeName.toLowerCase();
-            if ((attrNameLower == 'size' ||
-                 attrNameLower == productDetails.primaryVariantLabel.toLowerCase()) &&
-                opt.values.isNotEmpty) {
-              initialSelectedSize = opt.values.first.name;
-              break;
-            }
-          }
-        }
-
-        String initialSelectedColor = overrideSelectedColor ?? productDetails.selectedColor;
-        if (initialSelectedColor.isEmpty && productDetails.colorOptions.isNotEmpty) {
-          initialSelectedColor = productDetails.colorOptions.first.name;
-        }
-        if (initialSelectedColor.isEmpty) {
-          for (final opt in productDetails.variantAttributeOptions) {
-            final attrNameLower = opt.attributeName.toLowerCase();
-            if ((attrNameLower == 'color name' || attrNameLower == 'color' ||
-                 attrNameLower == 'colour' || attrNameLower == 'اللون') &&
-                opt.values.isNotEmpty) {
-              initialSelectedColor = opt.values.first.name;
-              break;
-            }
-          }
-        }
-
-        // Declare material/height early so we can log them; they are updated in the loop below.
-        String? initialSelectedMaterial = overrideSelectedMaterial ?? productDetails.selectedMaterial;
-        double? initialSelectedHeelHeight = overrideSelectedHeelHeight ?? productDetails.selectedHeelHeightCm;
-
-        debugPrint(
-          '📌 Initial stored selection (first value of each attribute): '
-          'color="$initialSelectedColor", size="${initialSelectedSize ?? ''}", '
-          'material="${initialSelectedMaterial ?? ''}", height=${initialSelectedHeelHeight?.toStringAsFixed(1) ?? "null"}',
-        );
+        // Stored selection coming from the first API (`selected_variant`) via
+        // the model. We mirror those values here so existing availability
+        // logic can reuse them, but we do not change which chips are selected.
+        String? initialSelectedSize =
+            productDetails.selectedSize.isNotEmpty ? productDetails.selectedSize : null;
+        String initialSelectedColor =
+            productDetails.selectedColor.isNotEmpty ? productDetails.selectedColor : '';
+        String? initialSelectedMaterial = productDetails.selectedMaterial;
+        double? initialSelectedHeelHeight = productDetails.selectedHeelHeightCm;
         
-        // Align variantAttributeOptions (SIZE attribute) with the initial selected size.
-        // If we matched a catalog variant, we already have options with correct selection from override.
+        // IMPORTANT:
+        // Do NOT override the initial selection parsed from the first API
+        // (`selected_variant` → variantAttributeOptions / selected* fields).
+        // We only enrich size/color with availability flags and leave which
+        // chips are selected exactly as the backend decided.
         final List<VariantAttributeOption> updatedVariantAttributeOptions =
-            overrideVariantAttributeOptions ??
-            productDetails.variantAttributeOptions.map((opt) {
-          final attrNameLower = opt.attributeName.toLowerCase();
-          final bool isSizeAttribute =
-              attrNameLower == 'size' ||
-              attrNameLower == 'القياس' ||
-              attrNameLower == productDetails.primaryVariantLabel.toLowerCase();
-          final bool isColorAttribute =
-              attrNameLower == 'color name' ||
-              attrNameLower == 'color' ||
-              attrNameLower == 'colour' ||
-              attrNameLower == 'اللون';
-
-          // 1) For SIZE: align selection with initialSelectedSize from model
-          if (isSizeAttribute &&
-              initialSelectedSize != null &&
-              initialSelectedSize.isNotEmpty) {
-            final normalizedTarget = initialSelectedSize.toLowerCase().trim();
-            final newValues = opt.values.map((v) {
-              final isSelected =
-                  v.name.toLowerCase().trim() == normalizedTarget;
-              return VariantAttributeValue(
-                id: v.id,
-                name: v.name,
-                isAvailable: v.isAvailable,
-                isSelected: isSelected,
-              );
-            }).toList();
-
-            return VariantAttributeOption(
-              attributeName: opt.attributeName,
-              values: newValues,
-              selectedValue: initialSelectedSize,
-              apiAttributeName: opt.apiAttributeName,
-              attributeId: opt.attributeId,
-            );
-          }
-
-          // 1b) For COLOR: align selection with initialSelectedColor (stored selection)
-          if (isColorAttribute &&
-              initialSelectedColor.isNotEmpty &&
-              opt.values.isNotEmpty) {
-            final normalizedTarget = initialSelectedColor.toLowerCase().trim();
-            final newValues = opt.values.map((v) {
-              final isSelected =
-                  v.name.toLowerCase().trim() == normalizedTarget;
-              return VariantAttributeValue(
-                id: v.id,
-                name: v.name,
-                isAvailable: v.isAvailable,
-                isSelected: isSelected,
-              );
-            }).toList();
-            return VariantAttributeOption(
-              attributeName: opt.attributeName,
-              values: newValues,
-              selectedValue: initialSelectedColor,
-              apiAttributeName: opt.apiAttributeName,
-              attributeId: opt.attributeId,
-            );
-          }
-
-          // 2) For non-color attributes with ONLY ONE option (e.g. MATERIAL, HEIGHT, BRAND):
-          //    auto-select that single option by default.
-          if (!isColorAttribute && opt.values.length == 1) {
-            final v = opt.values.first;
-            final singleSelected = VariantAttributeValue(
-              id: v.id,
-              name: v.name,
-              isAvailable: true,
-              isSelected: true,
-            );
-
-            return VariantAttributeOption(
-              attributeName: opt.attributeName,
-              values: [singleSelected],
-              selectedValue: v.name,
-              apiAttributeName: opt.apiAttributeName,
-              attributeId: opt.attributeId,
-            );
-          }
-
-          // 3) Otherwise, keep as-is
-          return opt;
-        }).toList();
+            productDetails.variantAttributeOptions;
         
-        // Update color options to reflect availability
-        // If a size is selected, check availability for that size; otherwise check all variants
+        // Update color options: use attribute_value_combinations when present (no loop); else fall back to variant_combinations loop
         List<ColorOption> updatedColorOptions = productDetails.colorOptions.map((color) {
-          // Get the actual color name from variantAttributeOptions (for matching)
-          String? colorNameForMatching;
-          for (final opt in productDetails.variantAttributeOptions) {
-            final attrNameLower = opt.attributeName.toLowerCase();
-            if (attrNameLower == 'color name' || 
-                attrNameLower == 'color' || 
-                attrNameLower == 'colour' ||
-                attrNameLower == 'اللون') {
-              try {
-                final matchedValue = opt.values.firstWhere(
-                  (v) => v.id == color.id,
-                );
-                colorNameForMatching = matchedValue.name;
+          bool hasInStockVariant = false;
+          if (avc.isNotEmpty) {
+            hasInStockVariant = avc.containsKey(color.id);
+          } else {
+            String? colorNameForMatching;
+            for (final opt in productDetails.variantAttributeOptions) {
+              final attrNameLower = opt.attributeName.toLowerCase();
+              if (attrNameLower == 'color name' || attrNameLower == 'color' || attrNameLower == 'colour' || attrNameLower == 'اللون') {
+                try {
+                  final matchedValue = opt.values.firstWhere((v) => v.id == color.id);
+                  colorNameForMatching = matchedValue.name;
+                  break;
+                } catch (_) {}
+              }
+            }
+            colorNameForMatching ??= color.name;
+            if ((colorNameForMatching.isEmpty || colorNameForMatching.startsWith('COLOR_ID_')) && color.displayName != null && color.displayName!.isNotEmpty) {
+              colorNameForMatching = color.displayName;
+            }
+            final normalizedColorName = normalize(colorNameForMatching ?? '');
+            final hasValidColorName = normalizedColorName.isNotEmpty;
+            for (final v in productDetails.variantCombinations) {
+              final variantColorName = getVariantColorValue(v);
+              if (variantColorName == null) continue;
+              final normalizedVariant = normalize(variantColorName);
+              final colorMatch = hasValidColorName && normalizedVariant.isNotEmpty &&
+                  (normalizedVariant == normalizedColorName ||
+                   normalizedVariant.contains(normalizedColorName) ||
+                   normalizedColorName.contains(normalizedVariant));
+              if (!colorMatch) continue;
+              if (initialSelectedSize != null && initialSelectedSize.isNotEmpty) {
+                final bool sizeMatch = v.hasAttributeValue(productDetails.primaryVariantLabel, initialSelectedSize) ||
+                                     v.hasAttributeValue('size', initialSelectedSize) ||
+                                     v.hasAttributeValue('SIZE', initialSelectedSize);
+                if (!sizeMatch) continue;
+              }
+              if (_isVariantInStock(v)) {
+                hasInStockVariant = true;
                 break;
-              } catch (e) {
-                // ID not found, continue
               }
             }
           }
-          if (colorNameForMatching == null || colorNameForMatching.isEmpty) {
-            colorNameForMatching = color.name;
-          }
-          // Fallback for Arabic: use displayName when name is placeholder/empty
-          if ((colorNameForMatching == null || colorNameForMatching.isEmpty || colorNameForMatching.startsWith('COLOR_ID_')) &&
-              color.displayName != null && color.displayName!.isNotEmpty) {
-            colorNameForMatching = color.displayName;
-          }
-          
-          // Check if this color has any in-stock variants
-          bool hasInStockVariant = false;
-          final normalizedColorName = normalize(colorNameForMatching ?? '');
-          // CRITICAL: Empty string causes "x".contains("") = true, incorrectly matching all variants (Arabic bug)
-          final hasValidColorName = normalizedColorName.isNotEmpty;
-          
-          for (final v in productDetails.variantCombinations) {
-            final variantColorName = getVariantColorValue(v);
-            if (variantColorName == null) continue;
-            
-            final normalizedVariant = normalize(variantColorName);
-            final colorMatch = hasValidColorName && normalizedVariant.isNotEmpty &&
-                (normalizedVariant == normalizedColorName ||
-                 (normalizedColorName.isNotEmpty && normalizedVariant.contains(normalizedColorName)) ||
-                 (normalizedVariant.isNotEmpty && normalizedColorName.contains(normalizedVariant)));
-            
-            if (!colorMatch) continue;
-            
-            // If a size is selected, check if this variant matches that size
-            if (initialSelectedSize != null && initialSelectedSize.isNotEmpty) {
-              final bool sizeMatch = v.hasAttributeValue(productDetails.primaryVariantLabel, initialSelectedSize) ||
-                                   v.hasAttributeValue('size', initialSelectedSize) ||
-                                   v.hasAttributeValue('SIZE', initialSelectedSize);
-              if (!sizeMatch) continue;
-            }
-            
-            // Check stock (treat null quantity as available when inStock=true)
-            final qty = v.quantityAvailable;
-            final isInStock = _isVariantInStock(v);
-            if (isInStock) {
-              hasInStockVariant = true;
-              break;
-            }
-          }
-          
-          debugPrint('🎨 Initial load: Color "${color.displayNameOrName}" (${colorNameForMatching}) - Available: $hasInStockVariant${initialSelectedSize != null && initialSelectedSize.isNotEmpty ? " (for size $initialSelectedSize)" : ""}');
-          
+          debugPrint('🎨 Initial load: Color "${color.displayNameOrName}" - Available: $hasInStockVariant${avc.isNotEmpty ? " (from attribute_value_combinations)" : ""}');
           return ColorOption(
             id: color.id,
             name: color.name,
@@ -1843,59 +1665,20 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
               initialSelectedHeelHeight ?? productDetails.selectedHeelHeightCm,
         );
 
-        // On initial load, set material (and similar) availability from variants: enable if a variant
-        // EXISTS (size+color+material), not only when in stock, so buttons are not all grey when out of stock.
-        updatedProduct = _recomputeMaterialAvailabilityFromVariants(updatedProduct);
-
-        // Debug: values we send to the filter at initial (first value of all attributes)
-        final initialFilterInput = updatedProduct.getSelectedAttributesByValueName();
-        debugPrint(
-          '🔍 [Initial] Calling filter (findVariantMatchingSelectionByValueName) with: $initialFilterInput '
-          '(at initial we use first value of all attributes: color, size, material, height)',
-        );
-        debugPrint(
-          '########### initial selected size:"${updatedProduct.selectedSize}", '
-          'material:"${updatedProduct.selectedMaterial}", heelHeight:${updatedProduct.selectedHeelHeightCm?.toStringAsFixed(1) ?? "null"}',
-        );
+        // Initial load: use ONLY lite response data. Do NOT use variant_combinations here.
+        // Price, inStock, selectedVariantQuantityAvailable are already set from selected_variant in the model.
+        // Availability from variants is applied only after user selects attributes (when we have normal API data).
         int initialQuantity = 1;
-        
-        final VariantCombination? selectedVariant = _findSelectedVariant(updatedProduct);
-        if (selectedVariant != null) {
-          final double? quantityAvailable = selectedVariant.quantityAvailable;
-          bool variantInStock = selectedVariant.inStock;
-          
-          debugPrint('📦 Initial variant: variantId=${selectedVariant.variantId}, inStock=$variantInStock, quantityAvailable=$quantityAvailable');
-          
-          // Check stock: if quantity is known, require > 0. If unknown (null), rely on inStock flag.
-          final qty = quantityAvailable;
-          if (qty != null) {
-            variantInStock = variantInStock && qty > 0;
-          }
-          
-          if (qty != null && qty > 0) {
-            final int maxAllowed = qty.toInt();
-            // Ensure initial quantity doesn't exceed available stock
-            initialQuantity = initialQuantity > maxAllowed ? maxAllowed : initialQuantity;
-            if (initialQuantity <= 0) {
-              initialQuantity = 1;
-            }
-          } else {
-            initialQuantity = 1;
-          }
-          
-          updatedProduct = updatedProduct.copyWith(
-            inStock: variantInStock,
-            selectedVariantQuantityAvailable: selectedVariant.quantityAvailable?.toInt(),
-          );
-          // Set initial images by color only (variant_id from first variant matching selected color)
-          if (updatedProduct.variantImagesMap.isNotEmpty) {
-            final vid = updatedProduct.variantIdForImagesByColor;
-            if (vid != null && vid.isNotEmpty) {
-              updatedProduct = updatedProduct.withImagesForVariant(vid);
-            }
-          }
+        final int? qtyAvailable = updatedProduct.selectedVariantQuantityAvailable;
+        if (qtyAvailable != null && qtyAvailable > 0) {
+          initialQuantity = initialQuantity > qtyAvailable ? qtyAvailable : initialQuantity;
+          if (initialQuantity <= 0) initialQuantity = 1;
         }
-        
+        debugPrint(
+          '📦 [Initial] Lite only: price=${updatedProduct.price}, inStock=${updatedProduct.inStock}, '
+          'quantity_available=$qtyAvailable, initialQuantity=$initialQuantity (no variant_combinations)',
+        );
+
         debugPrint(
           '📤 [Catalog→Details] Final data passed to UI (ProductDetailsLoaded): '
           'selectedColor="${updatedProduct.selectedColor}", selectedSize="${updatedProduct.selectedSize}", '
@@ -1904,7 +1687,264 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         for (final o in updatedProduct.variantAttributeOptions) {
           debugPrint('   → UI option "${o.attributeName}": selectedValue="${o.selectedValue}"');
         }
-        emit(ProductDetailsLoaded(updatedProduct, quantity: initialQuantity, isAdding: false));
+        // If normal API already completed (before lite), use its variant_combinations for this product
+        List<VariantCombination>? vcFromNormal;
+        if (_pendingNormalApiProductId == updatedProduct.id &&
+            _pendingVariantCombinationsFromNormalApi != null &&
+            _pendingVariantCombinationsFromNormalApi!.isNotEmpty) {
+          vcFromNormal = _pendingVariantCombinationsFromNormalApi;
+          _pendingVariantCombinationsFromNormalApi = null;
+          _pendingNormalApiProductId = null;
+          debugPrint(
+            '   ✅ [Lite load] Applying pending normal API variant_combinations (${vcFromNormal!.length}) for product ${updatedProduct.id}',
+          );
+        }
+        emit(ProductDetailsLoaded(
+          updatedProduct,
+          quantity: initialQuantity,
+          isAdding: false,
+          variantCombinationsFromNormalApi: vcFromNormal,
+        ));
+        // Normal API was started in parallel; when it completes, MergeFullVariantDataEvent will merge (or was already stored as pending).
+      },
+    );
+  }
+
+  /// Handles loading the full variant combinations/attributes payload
+  /// (api_load = normal) in the background. This event runs after the lite UI
+  /// has been painted. The repository parses the normal API response in a
+  /// background isolate (parseProductDetailsInBackground) so the main thread
+  /// stays responsive; when done we merge and emit.
+  Future<void> _onLoadProductVariantsCombinations(
+    LoadProductVariantsCombinationsEvent event,
+    Emitter<ProductDetailsState> emit,
+  ) async {
+    final blocState = state;
+    if (blocState is! ProductDetailsLoaded) {
+      return;
+    }
+
+    try {
+      debugPrint(
+        '🛰 ProductDetailsBloc: [Background] Sending /ecom/get/product (api_load=normal) '
+        'for id=${event.productId}, type=${event.productType}',
+      );
+
+      // Network runs async; parsing of response is done in isolate in repository.
+      final fullResult = await getProductDetails(
+        event.productId,
+        productType: event.productType,
+        apiLoad: 'normal',
+      );
+
+      fullResult.fold(
+        (failure) {
+          debugPrint(
+            '⚠️ ProductDetailsBloc: Failed to load full variant combinations (api_load=normal): ${failure.message}',
+          );
+        },
+        (fullDetails) {
+          debugPrint(
+            '📡 ProductDetailsBloc: Received /ecom/get/product response (api_load=normal) '
+            'for id=${event.productId} → '
+            'variants=${fullDetails.variantCombinations.length}, '
+            'attrs=${fullDetails.variantAttributeOptions.length}',
+          );
+
+          final currentState = state;
+          if (currentState is! ProductDetailsLoaded) {
+            return;
+          }
+
+          final currentProduct = currentState.productDetails;
+
+          // Merge heavy variant payload from fullDetails while preserving
+          // the current UI selection (color/size/material/height, etc.).
+          final newAvc = fullDetails.attributeValueCombinations;
+          // Refresh size/color availability from attribute_value_combinations (no loop)
+          final mergedSizeOptions = newAvc.isNotEmpty
+              ? currentProduct.sizeOptions.map((s) => SizeOption(
+                  id: s.id,
+                  name: s.name,
+                  isAvailable: newAvc.containsKey(s.id),
+                  isRecommended: s.isRecommended,
+                  isSelected: s.isSelected,
+                )).toList()
+              : currentProduct.sizeOptions;
+          final mergedColorOptions = newAvc.isNotEmpty
+              ? currentProduct.colorOptions.map((c) => ColorOption(
+                  id: c.id,
+                  name: c.name,
+                  displayName: c.displayName,
+                  code: c.code,
+                  images: c.images,
+                  isSelected: c.isSelected,
+                  isAvailable: newAvc.containsKey(c.id),
+                )).toList()
+              : currentProduct.colorOptions;
+          // Do NOT merge variant_combinations into product; keep from normal API separate.
+          final mergedProduct = currentProduct.copyWith(
+            variantAttributeOptions: fullDetails.variantAttributeOptions,
+            variantImagesMap: fullDetails.variantImagesMap,
+            attributeValueCombinations: newAvc,
+            sizeOptions: mergedSizeOptions,
+            colorOptions: mergedColorOptions,
+          );
+
+          debugPrint(
+            '✅ ProductDetailsBloc: Full variant combinations stored separately '
+            '(variantCombinationsFromNormalApi=${fullDetails.variantCombinations.length}, '
+            'attrs=${mergedProduct.variantAttributeOptions.length})',
+          );
+
+          emit(
+            currentState.copyWith(
+              productDetails: mergedProduct,
+              variantCombinationsFromNormalApi: fullDetails.variantCombinations,
+            ),
+          );
+        },
+      );
+    } catch (e) {
+      debugPrint(
+        '⚠️ ProductDetailsBloc: Exception while loading full variant combinations: $e',
+      );
+    }
+  }
+
+  /// Merges full variant data (from normal API) into current product.
+  /// Called when the normal API completes; it may complete before or after the lite API.
+  void _onMergeFullVariantData(
+    MergeFullVariantDataEvent event,
+    Emitter<ProductDetailsState> emit,
+  ) {
+    final fullDetails = event.fullDetails;
+    debugPrint(
+      '📥 [Normal API → Merge] _onMergeFullVariantData received: '
+      'variantCombinations.length=${fullDetails.variantCombinations.length}, '
+      'variantAttributeOptions.length=${fullDetails.variantAttributeOptions.length}',
+    );
+    if (fullDetails.variantCombinations.isEmpty) {
+      debugPrint(
+        '   ⚠️ [Normal API → Merge] fullDetails.variantCombinations is EMPTY – '
+        'check if normal API response actually contains variant_combinations',
+      );
+    }
+    final blocState = state;
+    if (blocState is! ProductDetailsLoaded) {
+      debugPrint(
+        '   📌 [Normal API → Merge] state is not ProductDetailsLoaded – '
+        'storing variant_combinations (${fullDetails.variantCombinations.length}) for product ${fullDetails.id} to apply when lite loads',
+      );
+      _pendingVariantCombinationsFromNormalApi = fullDetails.variantCombinations;
+      _pendingNormalApiProductId = fullDetails.id;
+      return;
+    }
+    final currentProduct = blocState.productDetails;
+    if (currentProduct.id != fullDetails.id) {
+      debugPrint(
+        '⚠️ ProductDetailsBloc: Ignoring MergeFullVariantData (product mismatch: '
+        'current=${currentProduct.id}, full=${fullDetails.id})',
+      );
+      return;
+    }
+    final newAvc = fullDetails.attributeValueCombinations;
+    final mergedSizeOptions = newAvc.isNotEmpty
+        ? currentProduct.sizeOptions.map((s) => SizeOption(
+            id: s.id,
+            name: s.name,
+            isAvailable: newAvc.containsKey(s.id),
+            isRecommended: s.isRecommended,
+            isSelected: s.isSelected,
+          )).toList()
+        : currentProduct.sizeOptions;
+    final mergedColorOptions = newAvc.isNotEmpty
+        ? currentProduct.colorOptions.map((c) => ColorOption(
+            id: c.id,
+            name: c.name,
+            displayName: c.displayName,
+            code: c.code,
+            images: c.images,
+            isSelected: c.isSelected,
+            isAvailable: newAvc.containsKey(c.id),
+          )).toList()
+        : currentProduct.colorOptions;
+    // Do NOT merge variant_combinations into productDetails (lite has empty; would get overridden).
+    // Keep variant_combinations from normal API separate; controller uses them on attribute click.
+    final mergedProduct = currentProduct.copyWith(
+      variantAttributeOptions: fullDetails.variantAttributeOptions,
+      variantImagesMap: fullDetails.variantImagesMap,
+      attributeValueCombinations: newAvc,
+      sizeOptions: mergedSizeOptions,
+      colorOptions: mergedColorOptions,
+    );
+    debugPrint(
+      '✅ ProductDetailsBloc: Full variant data stored separately (variantCombinationsFromNormalApi=${fullDetails.variantCombinations.length}), '
+      'productDetails unchanged for variant_combinations (attrs=${mergedProduct.variantAttributeOptions.length})',
+    );
+    emit(blocState.copyWith(
+      productDetails: mergedProduct,
+      variantCombinationsFromNormalApi: fullDetails.variantCombinations,
+    ));
+  }
+
+  /// Fallback when user clicks an attribute and normal API has not provided
+  /// variant_combinations (loading, empty, or failed). Calls /ecom/get/variant/lite.
+  Future<void> _onFetchVariantLiteFallback(
+    FetchVariantLiteFallbackEvent event,
+    Emitter<ProductDetailsState> emit,
+  ) async {
+    if (event.attributeValueIds.isEmpty) return;
+    final blocState = state;
+    if (blocState is! ProductDetailsLoaded) return;
+    if (blocState.productDetails.id != event.productId) return;
+
+    debugPrint(
+      '🔄 ProductDetailsBloc: Fetch variant lite fallback (productId=${event.productId}, '
+      'attributeValueIds=${event.attributeValueIds})',
+    );
+    emit(blocState.copyWith(isVariantFilterLoading: true));
+
+    final result = await getVariantLite(event.productId, event.attributeValueIds);
+
+    final currentState = state;
+    if (currentState is! ProductDetailsLoaded) {
+      return; // State changed (e.g. user left); no copyWith on base State
+    }
+
+    result.fold(
+      (failure) {
+        debugPrint(
+          '⚠️ ProductDetailsBloc: Variant lite fallback failed: ${failure.message}',
+        );
+        emit(currentState.copyWith(isVariantFilterLoading: false));
+      },
+      (variantDetails) {
+        final currentProduct = currentState.productDetails;
+        final mergedProduct = currentProduct.copyWith(
+          price: variantDetails.price,
+          inStock: variantDetails.inStock,
+          selectedVariantQuantityAvailable:
+              variantDetails.selectedVariantQuantityAvailable,
+        );
+        List<VariantCombination>? vc = currentState.variantCombinationsFromNormalApi;
+        if (variantDetails.variantCombinations.isNotEmpty) {
+          vc = variantDetails.variantCombinations;
+          debugPrint(
+            '✅ ProductDetailsBloc: Variant lite fallback returned '
+            '${vc.length} variant(s); updating state',
+          );
+        } else {
+          debugPrint(
+            '✅ ProductDetailsBloc: Variant lite fallback updated price/inStock/qty '
+            '(no variant_combinations in response)',
+          );
+        }
+        emit(currentState.copyWith(
+          productDetails: mergedProduct,
+          variantCombinationsFromNormalApi: vc,
+          isVariantFilterLoading: false,
+        ));
       },
     );
   }
@@ -1956,16 +1996,16 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         tags: currentProduct.tags,
       );
       
-      emit(ProductDetailsLoaded(updatedProduct, quantity: currentState.quantity, isAdding: currentState.isAdding));
+      emit(currentState.copyWith(productDetails: updatedProduct, quantity: currentState.quantity, isAdding: currentState.isAdding));
       
       final result = await toggleFavorite(event.productId);
       result.fold(
         (failure) {
           // Revert on failure
-          emit(ProductDetailsLoaded(currentProduct, quantity: currentState.quantity, isAdding: currentState.isAdding));
+          emit(currentState.copyWith(productDetails: currentProduct, quantity: currentState.quantity, isAdding: currentState.isAdding));
           emit(ProductDetailsError(failure.message));
         },
-        (_) => emit(ProductDetailsLoaded(updatedProduct, quantity: currentState.quantity, isAdding: currentState.isAdding)),
+        (_) => emit(currentState.copyWith(productDetails: updatedProduct, quantity: currentState.quantity, isAdding: currentState.isAdding)),
       );
     }
   }
@@ -3154,7 +3194,7 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
       }
       // If still no update (no variant for color, no option images), keep current images to avoid blank.
 
-      emit(ProductDetailsLoaded(updatedProduct, quantity: nextQuantity, isAdding: false));
+      emit(currentState.copyWith(productDetails: updatedProduct, quantity: nextQuantity, isAdding: false));
       
       final result = await selectColor(SelectColorParams(
         productId: event.productId,
@@ -3530,8 +3570,8 @@ class ProductDetailsBloc extends Bloc<ProductDetailsEvent, ProductDetailsState> 
         'variantId=${selectedVariant?.variantId}, inStock=$inStock, qty=${selectedVariant?.quantityAvailable}',
       );
 
-      emit(ProductDetailsLoaded(
-        productToEmit,
+      emit(currentState.copyWith(
+        productDetails: productToEmit,
         quantity: nextQuantity,
         isAdding: currentState.isAdding,
       ));

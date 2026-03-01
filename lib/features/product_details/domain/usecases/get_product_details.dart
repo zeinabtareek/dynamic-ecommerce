@@ -10,7 +10,15 @@ class GetProductDetails implements UseCase<ProductDetails, String> {
   const GetProductDetails(this.repository);
 
   @override
-  Future<Either<Failure, ProductDetails>> call(String productId, {String productType = 'variant'}) async {
-    return await repository.getProductDetails(productId, productType: productType);
+  Future<Either<Failure, ProductDetails>> call(
+    String productId, {
+    String productType = 'variant',
+    String apiLoad = 'normal',
+  }) async {
+    return await repository.getProductDetails(
+      productId,
+      productType: productType,
+      apiLoad: apiLoad,
+    );
   }
 }

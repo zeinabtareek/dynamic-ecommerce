@@ -25,12 +25,15 @@ class ProductInfoSection extends StatelessWidget {
   /// When product details are loading, pass card preview to show image/brand/title/price;
   /// sections without data show skeleton loaders until API responds.
   final ProductDetailsCardPreview? cardPreview;
+  /// Called after user selects an attribute (e.g. to trigger variant lite fallback when normal API has no variant_combinations).
+  final VoidCallback? onAfterAttributeSelected;
 
   const ProductInfoSection({
     super.key,
     this.productDetails,
     this.scrollController,
     this.cardPreview,
+    this.onAfterAttributeSelected,
   }) : assert(productDetails != null || cardPreview != null,
             'Either productDetails or cardPreview must be provided');
 
@@ -137,6 +140,25 @@ class ProductInfoSection extends StatelessWidget {
     );
   }
 
+  /// Shared skeleton content used for variant attributes (e.g. Size / other attributes).
+  Widget _variantAttributesSkeletonContent(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _shimmerLine(context, height: 18, width: 80, radius: 8),
+        SizedBox(height: ResponsiveConstants.mdSpacing),
+        Row(
+          children: [
+            for (int i = 0; i < 5; i++) ...[
+              if (i > 0) SizedBox(width: ResponsiveConstants.smSpacing),
+              _shimmerLine(context, height: 40, width: 64, radius: 8),
+            ],
+          ],
+        ),
+      ],
+    );
+  }
+
   /// Skeleton that matches the variant attributes card (e.g. Size / attribute chips).
   Widget _shimmerVariantAttributesCard(BuildContext context) {
     final theme = Theme.of(context);
@@ -156,21 +178,7 @@ class ProductInfoSection extends StatelessWidget {
           ),
         ],
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _shimmerLine(context, height: 18, width: 80, radius: 8),
-          SizedBox(height: ResponsiveConstants.mdSpacing),
-          Row(
-            children: [
-              for (int i = 0; i < 5; i++) ...[
-                if (i > 0) SizedBox(width: ResponsiveConstants.smSpacing),
-                _shimmerLine(context, height: 40, width: 64, radius: 8),
-              ],
-            ],
-          ),
-        ],
-      ),
+      child: _variantAttributesSkeletonContent(context),
     );
   }
 
@@ -502,26 +510,11 @@ class ProductInfoSection extends StatelessWidget {
                     ],
                   ),
                   child: isVariantFilterLoading
-                      ? Padding(
-                          padding: EdgeInsets.symmetric(
-                            vertical: ResponsiveConstants.lgSpacing,
-                          ),
-                          child: Center(
-                            child: SizedBox(
-                              height: 24,
-                              width: 24,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2.5,
-                                valueColor: AlwaysStoppedAnimation<Color>(
-                                  primary,
-                                ),
-                              ),
-                            ),
-                          ),
-                        )
+                      ? _variantAttributesSkeletonContent(context)
                       : _DynamicVariantAttributesSection(
                           productDetails: productDetails,
                           variantController: variantController,
+                          onAfterAttributeSelected: onAfterAttributeSelected,
                         ),
                 );
               },
@@ -554,6 +547,7 @@ class ProductInfoSection extends StatelessWidget {
                     child: ColorSelectionSection(
                       productDetails: productDetails,
                       scrollController: scrollController,
+                      onAfterAttributeSelected: onAfterAttributeSelected,
                     ),
                   )
                 : _shimmerColorSelectionCard(context),
@@ -877,10 +871,12 @@ HomeProduct.Product _mapRelatedToHomeProduct(RelatedProduct rp) {
 class _DynamicVariantAttributesSection extends StatelessWidget {
   final ProductDetails productDetails;
   final DynamicVariantController variantController;
+  final VoidCallback? onAfterAttributeSelected;
 
   const _DynamicVariantAttributesSection({
     required this.productDetails,
     required this.variantController,
+    this.onAfterAttributeSelected,
   });
 
   @override
@@ -951,7 +947,19 @@ class _DynamicVariantAttributesSection extends StatelessWidget {
                     return const SizedBox.shrink();
                   }
                   
-                  final isSelected = selectedValueId == valueId;
+                  // On initial load, when the controller has not yet built
+                  // selectedAttributes for this attribute, fall back to the
+                  // model's isSelected flag (set from `selected_variant` in
+                  // the first API response).
+                  final isSelected = selectedValueId != null
+                      ? selectedValueId == valueId
+                      : value.isSelected;
+                  if (selectedValueId == null && value.isSelected) {
+                    debugPrint(
+                      '✅ [Step 4 - UI] Chip "${attrOption.attributeName}" = "${value.name}" '
+                      'selected via model (selected_variant); controller had no selection yet',
+                    );
+                  }
                   
                   // Get the state of this value (three-state logic)
                   final valueState = variantController.getValueState(attributeId, valueId);
@@ -1011,7 +1019,15 @@ class _DynamicVariantAttributesSection extends StatelessWidget {
                         ? () {
                             debugPrint('🎯 Selecting attribute $attributeId → value $valueId (${value.name})');
                             debugPrint('   State: $valueState');
+                            // Sync controller with latest product details and variant_combinations from normal API
+                            // (kept separate; used for matching on attribute click)
+                            final state = context.read<ProductDetailsBloc>().state;
+                            if (state is ProductDetailsLoaded) {
+                              variantController.updateProductDetails(state.productDetails);
+                              variantController.setVariantCombinationsForMatching(state.variantCombinationsFromNormalApi);
+                            }
                             variantController.selectAttributeValue(attributeId, valueId);
+                            onAfterAttributeSelected?.call();
                           }
                         : null,
                     behavior: isEnabled ? HitTestBehavior.opaque : HitTestBehavior.deferToChild,

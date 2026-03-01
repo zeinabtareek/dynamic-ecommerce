@@ -22,16 +22,40 @@ class ProductDetailsRepositoryImpl implements ProductDetailsRepository {
   // Repository now uses API-only data, no demo/dummy data
 
   @override
-  Future<Either<Failure, ProductDetails>> getProductDetails(String productId, {String productType = 'variant'}) async {
+  Future<Either<Failure, ProductDetails>> getProductDetails(
+    String productId, {
+    String productType = 'variant',
+    String apiLoad = 'normal',
+  }) async {
     try {
       // Always try to fetch from API first
       if (remoteDataSource != null) {
-        developer.log('🌐 Fetching product details from API for: $productId, type: $productType');
-        final productData = await remoteDataSource!.getProductDetails(productId, productType: productType);
+        developer.log(
+          '🌐 Fetching product details from API for: $productId, type: $productType, apiLoad: $apiLoad',
+        );
+        final networkStopwatch = Stopwatch()..start();
+        final productData = await remoteDataSource!.getProductDetails(
+          productId,
+          productType: productType,
+          apiLoad: apiLoad,
+        );
+        networkStopwatch.stop();
+        developer.log(
+          '⏱ ProductDetailsRepository: /ecom/get/product (api_load=$apiLoad) '
+          'network stage took ${networkStopwatch.elapsedMilliseconds} ms',
+        );
 
-        // Convert API response to ProductDetails on a background isolate
-        // so that heavy attribute/variant parsing does not block the UI thread.
-        final productDetails = await parseProductDetailsInBackground(productData);
+        // Lite: parse on main thread — payload is small, avoid isolate overhead for faster first paint.
+        // Normal: parse in background isolate — heavy payload (variant_combinations, etc.) must not block UI.
+        final parseStopwatch = Stopwatch()..start();
+        final ProductDetails productDetails = apiLoad == 'lite'
+            ? ProductDetailsModel.fromApiJson(productData)
+            : await parseProductDetailsInBackground(productData);
+        parseStopwatch.stop();
+        developer.log(
+          '⏱ ProductDetailsRepository: parse (api_load=$apiLoad) '
+          '${apiLoad == 'lite' ? "main thread" : "isolate"} took ${parseStopwatch.elapsedMilliseconds} ms',
+        );
 
         return Right(productDetails);
       }
@@ -41,6 +65,24 @@ class ProductDetailsRepositoryImpl implements ProductDetailsRepository {
       return Left(ServerFailure('No data source available'));
     } catch (e) {
       developer.log('💥 Error getting product details: $e');
+        return Left(ServerFailure(e.toString()));
+    }
+  }
+
+  @override
+  Future<Either<Failure, ProductDetails>> getVariantLite(
+    String productId,
+    List<int> attributeValueIds,
+  ) async {
+    try {
+      if (remoteDataSource == null) {
+        return Left(ServerFailure('No data source available'));
+      }
+      final data = await remoteDataSource!.getVariantLite(productId, attributeValueIds);
+      final productDetails = ProductDetailsModel.fromApiJson(data);
+      return Right(productDetails);
+    } catch (e) {
+      developer.log('💥 getVariantLite failed: $e');
       return Left(ServerFailure(e.toString()));
     }
   }
@@ -94,7 +136,11 @@ class ProductDetailsRepositoryImpl implements ProductDetailsRepository {
       
       ProductDetails? productDetails;
       try {
-        final productData = await remoteDataSource!.getProductDetails(productId);
+        // For add‑to‑cart we always need the full variant payload.
+        final productData = await remoteDataSource!.getProductDetails(
+          productId,
+          apiLoad: 'normal',
+        );
         productDetails = await parseProductDetailsInBackground(productData);
         developer.log('✅ Product fetched from API: ${productDetails.name}');
       } catch (e) {
